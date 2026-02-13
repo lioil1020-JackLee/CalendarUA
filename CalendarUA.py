@@ -36,11 +36,15 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QToolBar,
     QTreeWidget,
+    QRadioButton,
+    QCheckBox,
+    QFileDialog,
     QTreeWidgetItem,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread
 from PySide6.QtGui import QAction, QIcon, QColor, QFont
 import qasync
+import re
 
 from database.sqlite_manager import SQLiteManager
 from core.opc_handler import OPCHandler
@@ -309,10 +313,6 @@ class CalendarUA(QMainWindow):
         db_settings_action.triggered.connect(self.show_db_settings)
         tools_menu.addAction(db_settings_action)
 
-        opc_settings_action = QAction("OPC UA 設定(&O)...", self)
-        opc_settings_action.triggered.connect(self.show_opc_settings)
-        tools_menu.addAction(opc_settings_action)
-
         tools_menu.addSeparator()
 
         # 主題設定子選單
@@ -492,6 +492,43 @@ class CalendarUA(QMainWindow):
                 background-color: #f0f0f0;
                 border-top: 1px solid #d0d0d0;
             }
+            QRadioButton {
+                color: #333;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #999999;
+                border-radius: 9px;
+                background-color: white;
+            }
+            QRadioButton::indicator:hover {
+                border: 2px solid #0078d4;
+                background-color: #f0f0f0;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #0078d4;
+                border: 2px solid #0078d4;
+            }
+            QCheckBox {
+                color: #333;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #999999;
+                border-radius: 2px;
+                background-color: white;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #0078d4;
+                background-color: #f0f0f0;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border: 2px solid #0078d4;
+                image: url(:/checkbox_check);
+            }
         """)
         # 更新日曆樣式
         self._apply_calendar_light_theme()
@@ -631,6 +668,43 @@ class CalendarUA(QMainWindow):
                 background-color: transparent;
                 border: none;
                 font-weight: bold;
+            }
+            QRadioButton {
+                color: #cccccc;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666666;
+                border-radius: 9px;
+                background-color: #1e1e1e;
+            }
+            QRadioButton::indicator:hover {
+                border: 2px solid #0e639c;
+                background-color: #252526;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+            }
+            QCheckBox {
+                color: #cccccc;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666666;
+                border-radius: 2px;
+                background-color: #1e1e1e;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #0e639c;
+                background-color: #252526;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+                image: url(:/checkbox_check);
             }
         """)
         # 更新日曆樣式
@@ -854,6 +928,11 @@ class CalendarUA(QMainWindow):
                     node_id=data["node_id"],
                     target_value=data["target_value"],
                     rrule_str=data["rrule_str"],
+                    opc_security_policy=data.get("opc_security_policy", "None"),
+                    opc_security_mode=data.get("opc_security_mode", "None"),
+                    opc_username=data.get("opc_username", ""),
+                    opc_password=data.get("opc_password", ""),
+                    opc_timeout=data.get("opc_timeout", 10),
                     is_enabled=1,
                 )
 
@@ -883,6 +962,11 @@ class CalendarUA(QMainWindow):
                     node_id=data["node_id"],
                     target_value=data["target_value"],
                     rrule_str=data["rrule_str"],
+                    opc_security_policy=data.get("opc_security_policy", "None"),
+                    opc_security_mode=data.get("opc_security_mode", "None"),
+                    opc_username=data.get("opc_username", ""),
+                    opc_password=data.get("opc_password", ""),
+                    opc_timeout=data.get("opc_timeout", 10),
                 )
 
                 if success:
@@ -975,8 +1059,26 @@ class CalendarUA(QMainWindow):
         node_id = schedule.get("node_id", "")
         target_value = schedule.get("target_value", "")
 
+        # 取得OPC設定
+        security_policy = schedule.get("opc_security_policy", "None")
+        username = schedule.get("opc_username", "")
+        password = schedule.get("opc_password", "")
+        timeout = schedule.get("opc_timeout", 10)
+
         try:
-            async with OPCHandler(opc_url) as handler:
+            # 建立OPCHandler並設定安全參數
+            handler = OPCHandler(opc_url, timeout=timeout)
+
+            # 設定安全策略
+            if security_policy != "None":
+                handler.security_policy = security_policy
+
+            # 設定認證
+            if username:
+                handler.username = username
+                handler.password = password
+
+            async with handler:
                 if handler.is_connected:
                     success = await handler.write_node(node_id, target_value)
                     if success:
@@ -992,8 +1094,21 @@ class CalendarUA(QMainWindow):
 
     async def connect_opc(self):
         """連線到 OPC UA 伺服器"""
-        # 這裡應該從設定或使用者輸入取得 URL
-        opc_url = "opc.tcp://localhost:4840"
+        # 優先使用選取的排程的 OPC URL，若無則使用第一筆排程的 URL
+        opc_url = None
+        current_row = self.schedule_table.currentRow()
+        if current_row >= 0 and current_row < len(self.schedules):
+            opc_url = self.schedules[current_row].get("opc_url", "")
+        elif self.schedules:
+            opc_url = self.schedules[0].get("opc_url", "")
+
+        if not opc_url:
+            QMessageBox.warning(
+                self,
+                "OPC 連線",
+                "請先在排程中設定 OPC URL 或選取一筆含有 OPC URL 的排程。",
+            )
+            return
 
         self.opc_handler = OPCHandler(opc_url)
 
@@ -1013,10 +1128,6 @@ class CalendarUA(QMainWindow):
     def show_db_settings(self):
         """顯示資料庫設定對話框"""
         QMessageBox.information(self, "資料庫設定", "資料庫設定功能開發中...")
-
-    def show_opc_settings(self):
-        """顯示 OPC UA 設定對話框"""
-        QMessageBox.information(self, "OPC UA 設定", "OPC UA 設定功能開發中...")
 
     def show_about(self):
         """顯示關於對話框"""
@@ -1340,12 +1451,721 @@ class OPCNodeBrowserDialog(QDialog):
         return self.selected_node
 
 
+class OPCSettingsDialog(QDialog):
+    """OPC UA 設定對話框"""
+
+    def __init__(self, parent=None, security_policy="None", username="", password="", timeout=10, security_mode="None", opc_url: str = ""):
+        super().__init__(parent)
+        self.security_policy = security_policy
+        self.security_mode = security_mode
+        self.username = username
+        self.password = password
+        self.timeout = timeout
+        self.opc_url = opc_url
+        self._detected_supported = None
+        
+        self.setup_ui()
+        
+        # 連接信號
+        self.chk_show_supported.toggled.connect(self.on_chk_show_supported_toggled)
+        self.rb_anonymous.toggled.connect(self.on_auth_mode_changed)
+        self.rb_username.toggled.connect(self.on_auth_mode_changed)
+        self.rb_certificate.toggled.connect(self.on_auth_mode_changed)
+        
+        # 載入現有設定
+        self.load_data()
+        
+        # 套用樣式
+        self.apply_style()
+
+    def setup_ui(self):
+        self.setWindowTitle("OPC UA 連線設定")
+        self.setMinimumWidth(900)
+        self.setMinimumHeight(520)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        # 使用者認證（頂部）
+        auth_top_layout = QHBoxLayout()
+        auth_top_layout.setSpacing(12)
+        auth_top_layout.setContentsMargins(0, 0, 0, 0)
+
+        auth_group = QGroupBox("User Authentication")
+        auth_group_layout = QVBoxLayout(auth_group)
+        auth_group_layout.setContentsMargins(10, 12, 10, 12)
+        auth_group_layout.setSpacing(8)
+        
+        # 認證方式單選按鈕容器（水平）
+        rb_layout = QHBoxLayout()
+        rb_layout.setContentsMargins(0, 0, 0, 0)
+        rb_layout.setSpacing(15)
+        self.rb_anonymous = QRadioButton("Anonymous")
+        self.rb_username = QRadioButton("Username and Password")
+        self.rb_certificate = QRadioButton("Certificate and Private Key")
+        rb_layout.addWidget(self.rb_anonymous)
+        rb_layout.addWidget(self.rb_username)
+        rb_layout.addWidget(self.rb_certificate)
+
+        auth_group_layout.addLayout(rb_layout)
+
+        # 認證欄位（username/password）
+        cred_layout = QGridLayout()
+        cred_layout.setSpacing(8)
+        cred_layout.setContentsMargins(0, 0, 0, 0)
+        self.username_label = QLabel("Username:")
+        cred_layout.addWidget(self.username_label, 0, 0)
+        self.username_edit = QLineEdit()
+        cred_layout.addWidget(self.username_edit, 0, 1)
+        self.password_label = QLabel("Password:")
+        cred_layout.addWidget(self.password_label, 0, 2)
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        cred_layout.addWidget(self.password_edit, 0, 3)
+
+        # 憑證欄位（檔案選取）
+        cert_layout = QGridLayout()
+        cert_layout.setSpacing(8)
+        cert_layout.setContentsMargins(0, 0, 0, 0)
+        self.client_cert_label = QLabel("Client Cert:")
+        cert_layout.addWidget(self.client_cert_label, 0, 0)
+        self.client_cert_edit = QLineEdit()
+        self.cert_browse_btn1 = QPushButton("Browse")
+        self.cert_browse_btn1.clicked.connect(lambda: self._browse_file(self.client_cert_edit))
+        cert_layout.addWidget(self.client_cert_edit, 0, 1)
+        cert_layout.addWidget(self.cert_browse_btn1, 0, 2)
+
+        self.client_key_label = QLabel("Private Key:")
+        cert_layout.addWidget(self.client_key_label, 1, 0)
+        self.client_key_edit = QLineEdit()
+        self.cert_browse_btn2 = QPushButton("Browse")
+        self.cert_browse_btn2.clicked.connect(lambda: self._browse_file(self.client_key_edit))
+        cert_layout.addWidget(self.client_key_edit, 1, 1)
+        cert_layout.addWidget(self.cert_browse_btn2, 1, 2)
+
+        auth_group_layout.addLayout(cred_layout)
+        auth_group_layout.addLayout(cert_layout)
+
+        # 右側按鈕（Apply / Cancel）- 固定大小，頂部對齐
+        btns_layout = QVBoxLayout()
+        btns_layout.setContentsMargins(0, 0, 0, 0)
+        btns_layout.setSpacing(8)
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setFixedSize(90, 40)
+        self.apply_btn.clicked.connect(self._on_apply)
+        btns_layout.addWidget(self.apply_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedSize(90, 40)
+        cancel_btn.clicked.connect(self.reject)
+        btns_layout.addWidget(cancel_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        btns_layout.addStretch()
+
+        auth_top_layout.addWidget(auth_group, 1)
+        # 按鈕布局容器，頂部對齐
+        btns_container = QWidget()
+        btns_container_layout = QVBoxLayout(btns_container)
+        btns_container_layout.setContentsMargins(0, 0, 0, 0)
+        btns_container_layout.addLayout(btns_layout)
+        btns_container_layout.addStretch()
+        auth_top_layout.addWidget(btns_container, 0)
+
+        layout.addLayout(auth_top_layout)
+
+        # 安全設定（中段）：左為 Security Mode，右為 Security Policy
+        sec_mid_layout = QHBoxLayout()
+        sec_mid_layout.setSpacing(12)
+        sec_mid_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Security Mode
+        mode_group = QGroupBox("Security Mode")
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setContentsMargins(10, 12, 10, 12)
+        mode_layout.setSpacing(8)
+        self.rb_mode_none = QRadioButton("None")
+        self.rb_mode_sign = QRadioButton("Sign")
+        self.rb_mode_sign_encrypt = QRadioButton("Sign & Encrypt")
+        mode_layout.addWidget(self.rb_mode_none)
+        mode_layout.addWidget(self.rb_mode_sign)
+        mode_layout.addWidget(self.rb_mode_sign_encrypt)
+
+        # Security Policy list
+        policy_group = QGroupBox("Security Policy")
+        policy_layout = QVBoxLayout(policy_group)
+        policy_layout.setContentsMargins(10, 12, 10, 12)
+        policy_layout.setSpacing(8)
+        self.policy_rb_none = QRadioButton("None")
+        self.policy_rb_basic128 = QRadioButton("Basic128RSA15")
+        self.policy_rb_basic256 = QRadioButton("Basic256")
+        self.policy_rb_basic256sha = QRadioButton("Basic256Sha256")
+        policy_layout.addWidget(self.policy_rb_none)
+        policy_layout.addWidget(self.policy_rb_basic128)
+        policy_layout.addWidget(self.policy_rb_basic256)
+        policy_layout.addWidget(self.policy_rb_basic256sha)
+
+        self.chk_show_supported = QCheckBox("Show only modes that are supported by the server")
+        policy_layout.addWidget(self.chk_show_supported)
+
+        sec_mid_layout.addWidget(mode_group, 1)
+        sec_mid_layout.addWidget(policy_group, 1)
+
+        layout.addLayout(sec_mid_layout)
+        
+        # 連線設定（下方）- 高度減少
+        connection_group = QGroupBox("連線設定")
+        connection_layout = QHBoxLayout(connection_group)
+        connection_layout.setContentsMargins(10, 8, 10, 8)
+        connection_layout.setSpacing(8)
+        connection_layout.addWidget(QLabel("連線超時 (秒):"))
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(1, 300)
+        self.timeout_spin.setValue(10)
+        self.timeout_spin.setFixedWidth(80)
+        connection_layout.addWidget(self.timeout_spin)
+        connection_layout.addStretch()
+        layout.addWidget(connection_group)
+
+    def apply_style(self):
+        """套用樣式，根據父視窗主題選擇亮色或暗色"""
+        is_dark = False
+        parent = self.parent()
+        
+        # 嘗試找到主視窗以取得主題設定
+        current_window = parent
+        while current_window:
+            if hasattr(current_window, "current_theme"):
+                if current_window.current_theme == "dark":
+                    is_dark = True
+                elif current_window.current_theme == "system":
+                    if hasattr(current_window, "is_system_dark_mode"):
+                        is_dark = current_window.is_system_dark_mode()
+                break
+            current_window = current_window.parent() if hasattr(current_window, "parent") else None
+
+        if is_dark:
+            self._apply_dark_style()
+        else:
+            self._apply_light_style()
+
+    def _apply_light_style(self):
+        """套用亮色樣式"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f5f5f5;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #d0d0d0;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 12px;
+                background-color: white;
+            }
+            QGroupBox::title {
+                color: #2c3e50;
+            }
+            QLabel {
+                color: #333;
+            }
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #106ebe;
+            }
+            QLineEdit {
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: white;
+                color: #333;
+            }
+            QLineEdit:focus {
+                border: 2px solid #0078d4;
+            }
+            QSpinBox {
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: white;
+                color: #333;
+            }
+            QSpinBox:focus {
+                border: 2px solid #0078d4;
+            }
+            QRadioButton {
+                color: #333;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #999999;
+                border-radius: 9px;
+                background-color: white;
+            }
+            QRadioButton::indicator:hover {
+                border: 2px solid #0078d4;
+                background-color: #f0f0f0;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #0078d4;
+                border: 2px solid #0078d4;
+            }
+            QCheckBox {
+                color: #333;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #999999;
+                border-radius: 2px;
+                background-color: white;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #0078d4;
+                background-color: #f0f0f0;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border: 2px solid #0078d4;
+            }
+        """)
+
+    def _apply_dark_style(self):
+        """套用暗色樣式"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #3d3d3d;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 12px;
+                background-color: #363636;
+            }
+            QGroupBox::title {
+                color: #ffffff;
+            }
+            QLabel {
+                color: #cccccc;
+            }
+            QPushButton {
+                background-color: #0e639c;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+            QLineEdit {
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: #1e1e1e;
+                color: #cccccc;
+            }
+            QLineEdit:focus {
+                border: 2px solid #0e639c;
+            }
+            QSpinBox {
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: #1e1e1e;
+                color: #cccccc;
+            }
+            QSpinBox:focus {
+                border: 2px solid #0e639c;
+            }
+            QRadioButton {
+                color: #cccccc;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666666;
+                border-radius: 9px;
+                background-color: #1e1e1e;
+            }
+            QRadioButton::indicator:hover {
+                border: 2px solid #0e639c;
+                background-color: #252526;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+            }
+            QCheckBox {
+                color: #cccccc;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666666;
+                border-radius: 2px;
+                background-color: #1e1e1e;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #0e639c;
+                background-color: #252526;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+            }
+        """)
+
+    def load_data(self):
+        """載入現有的 OPC 連線設定"""
+        # 設定安全策略單選按鈕（默認為 None）
+        policy_mapping = {
+            "None": self.policy_rb_none,
+            "Basic128Rsa15": self.policy_rb_basic128,
+            "Basic256": self.policy_rb_basic256,
+            "Basic256Sha256": self.policy_rb_basic256sha,
+        }
+        policy_btn = policy_mapping.get(self.security_policy, self.policy_rb_none)
+        policy_btn.setChecked(True)
+
+        # 設定使用者認證相關欄位（默認為 Anonymous）
+        if self.username or self.password:
+            self.rb_username.setChecked(True)
+        else:
+            self.rb_anonymous.setChecked(True)
+
+        self.username_edit.setText(self.username)
+        self.password_edit.setText(self.password)
+        self.timeout_spin.setValue(self.timeout)
+
+        # 初始化安全模式
+        mode_mapping = {
+            "None": self.rb_mode_none,
+            "Sign": self.rb_mode_sign,
+            "SignAndEncrypt": self.rb_mode_sign_encrypt,
+        }
+        mode_btn = mode_mapping.get(self.security_mode, self.rb_mode_none)
+        mode_btn.setChecked(True)
+        
+        # 初始化認證欄位可見性
+        self.on_auth_mode_changed()
+
+        # 啟用「只顯示伺服器支援的模式」複選框並觸發檢測
+        self.chk_show_supported.setChecked(True)
+
+    def get_settings(self) -> Dict[str, Any]:
+        """取得設定值"""
+        # security policy
+        if self.policy_rb_none.isChecked():
+            policy = "None"
+        elif self.policy_rb_basic128.isChecked():
+            policy = "Basic128Rsa15"
+        elif self.policy_rb_basic256.isChecked():
+            policy = "Basic256"
+        else:
+            policy = "Basic256Sha256"
+
+        # security mode
+        if self.rb_mode_none.isChecked():
+            mode = "None"
+        elif self.rb_mode_sign.isChecked():
+            mode = "Sign"
+        else:
+            mode = "SignAndEncrypt"
+
+        # auth method
+        if self.rb_anonymous.isChecked():
+            auth = "Anonymous"
+        elif self.rb_username.isChecked():
+            auth = "Username"
+        else:
+            auth = "Certificate"
+
+        return {
+            "security_policy": policy,
+            "security_mode": mode,
+            "auth_method": auth,
+            "username": self.username_edit.text(),
+            "password": self.password_edit.text(),
+            "client_cert": self.client_cert_edit.text(),
+            "client_key": self.client_key_edit.text(),
+            "timeout": self.timeout_spin.value(),
+            "show_only_supported": self.chk_show_supported.isChecked(),
+        }
+
+    def _browse_file(self, line_edit: QLineEdit):
+        path, _ = QFileDialog.getOpenFileName(self, "Select file")
+        if path:
+            line_edit.setText(path)
+
+    def on_auth_mode_changed(self):
+        # 當選擇 Anonymous 時隱藏/停用其他認證欄位
+        is_anonymous = self.rb_anonymous.isChecked()
+        is_username = self.rb_username.isChecked()
+
+        # Username/password visible only when username radio selected
+        self.username_label.setVisible(is_username)
+        self.username_edit.setVisible(is_username)
+        self.password_label.setVisible(is_username)
+        self.password_edit.setVisible(is_username)
+
+        # Certificate fields visible only when certificate radio selected
+        cert_visible = self.rb_certificate.isChecked()
+        self.client_cert_label.setVisible(cert_visible)
+        self.client_cert_edit.setVisible(cert_visible)
+        self.cert_browse_btn1.setVisible(cert_visible)
+        self.client_key_label.setVisible(cert_visible)
+        self.client_key_edit.setVisible(cert_visible)
+        self.cert_browse_btn2.setVisible(cert_visible)
+
+    def on_chk_show_supported_toggled(self, checked: bool):
+        """檢測或隱藏伺服器不支援的安全模式"""
+        if not checked:
+            # 取消勾選時顯示所有模式
+            self._show_all_policies_and_modes()
+            return
+
+        # 需要 OPC URL 才能進行檢測 - 無 OPC URL 時不進行檢測
+        if not self.opc_url:
+            return
+
+        # 禁用複選框並開始檢測
+        self.chk_show_supported.setEnabled(False)
+
+        # 在非同步任務中執行檢測
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self._detect_server_capabilities(self.opc_url))
+            else:
+                asyncio.run(self._detect_server_capabilities(self.opc_url))
+        except RuntimeError:
+            asyncio.run(self._detect_server_capabilities(self.opc_url))
+
+    async def _detect_server_capabilities(self, opc_url: str):
+        """偵測伺服器支援的安全策略和模式
+        
+        透過連接伺服器並解析日誌與異常信息來獲取支援的策略
+        """
+        supported_policies = set()
+        supported_modes = set()
+        error_message = None
+        
+        try:
+            from asyncua import Client
+            from asyncua.ua.uaerrors import UaError
+            import logging
+            import io
+            
+            # 攔截 asyncua 日誌以提取端點信息
+            log_capture = io.StringIO()
+            handler = logging.StreamHandler(log_capture)
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            asyncua_logger = logging.getLogger('asyncua.client.client')
+            asyncua_logger.addHandler(handler)
+            
+            try:
+                client = Client(opc_url)
+                await client.connect()
+                endpoints = await client.get_endpoints()
+                await client.disconnect()
+                
+                # 成功連接並獲取端點
+                for idx, ep in enumerate(endpoints):
+                    # 提取安全策略
+                    uri = getattr(ep, "SecurityPolicyUri", None)
+                    if uri:
+                        frag = uri.split("#")[-1] if "#" in str(uri) else str(uri).rstrip('/').split('/')[-1]
+                        norm = self._normalize_policy_name(frag)
+                        if norm and norm != "":
+                            supported_policies.add(norm)
+                            print(f"[OPC UA 檢測] 策略: {norm}")
+                    
+                    # 提取安全模式
+                    mode = getattr(ep, "SecurityMode", None)
+                    if mode is not None:
+                        name = getattr(mode, "name", None) or str(mode)
+                        norm_mode = self._normalize_mode_name(str(name))
+                        if norm_mode and norm_mode != "":
+                            supported_modes.add(norm_mode)
+                            print(f"[OPC UA 檢測] 模式: {norm_mode}")
+                            
+            except UaError as ua_exc:
+                # 連接失敗，嘗試從日誌和異常消息中提取信息
+                error_message = str(ua_exc)
+                print(f"[OPC UA 檢測] 連接異常: {error_message}")
+                
+                # 從日誌中提取所有 SecurityPolicyUri
+                log_content = log_capture.getvalue()
+                print(f"[OPC UA 檢測] 日誌內容長度: {len(log_content)}")
+                
+                # 使用正則表達式查找所有 SecurityPolicyUri
+                import re
+                uri_matches = re.findall(r"SecurityPolicyUri='([^']+)'", log_content)
+                print(f"[OPC UA 檢測] 從日誌找到 {len(uri_matches)} 個策略 URI: {set(uri_matches)}")
+                
+                for uri in uri_matches:
+                    frag = uri.split("#")[-1] if "#" in uri else uri.rstrip('/').split('/')[-1]
+                    norm = self._normalize_policy_name(frag)
+                    if norm and norm != "" and norm != "None":  # 除外 None 可能只是認證策略
+                        supported_policies.add(norm)
+                        print(f"[OPC UA 檢測] 從日誌提取策略: {norm}")
+                
+                # 同時從日誌中提取 SecurityMode
+                # 格式通常是: SecurityMode=<MessageSecurityMode.Sign: 2> 或 SecurityMode=<MessageSecurityMode.SignAndEncrypt: 3>
+                mode_matches = re.findall(r"SecurityMode=<MessageSecurityMode\.(\w+(?:And\w+)?)", log_content)
+                print(f"[OPC UA 檢測] 從日誌找到 {len(mode_matches)} 個安全模式: {set(mode_matches)}")
+                
+                for mode_str in set(mode_matches):  # 使用 set 避免重複
+                    norm_mode = self._normalize_mode_name(mode_str)
+                    if norm_mode and norm_mode != "":
+                        supported_modes.add(norm_mode)
+                        print(f"[OPC UA 檢測] 從日誌提取模式: {norm_mode}")
+
+                
+                # 如果還是沒有找到策略，至少報告所有找到的內容
+                if not supported_policies:
+                    print(f"[OPC UA 檢測] 警告: 未找到有效的安全策略")
+                    
+            finally:
+                asyncua_logger.removeHandler(handler)
+                log_capture.close()
+                
+        except Exception as exc:
+            error_message = str(exc)
+            print(f"[OPC UA 檢測] 未知錯誤: {error_message}")
+
+        # 更新 UI
+        def update_ui():
+            self.chk_show_supported.setEnabled(True)
+            
+            if supported_policies or supported_modes:
+                self._detected_supported = {"policies": supported_policies, "modes": supported_modes}
+                self._apply_supported_filters()
+            else:
+                self._show_all_policies_and_modes()
+
+        QTimer.singleShot(0, update_ui)
+    def _apply_supported_filters(self):
+        """套用伺服器支援的安全模式過濾"""
+        data = self._detected_supported or {}
+        policies = data.get("policies", set())
+        modes = data.get("modes", set())
+
+        # 只有當檢測到支援的模式時才進行過濾
+        # 如果檢測到空集合，則顯示所有（伺服器可能不報告這些資訊）
+        if not policies and not modes:
+            self._show_all_policies_and_modes()
+            return
+
+        # 控制安全策略單選按鈕的可見性
+        policy_buttons = [
+            (self.policy_rb_none, "None"),
+            (self.policy_rb_basic128, "Basic128Rsa15"),
+            (self.policy_rb_basic256, "Basic256"),
+            (self.policy_rb_basic256sha, "Basic256Sha256"),
+        ]
+        for btn, policy_name in policy_buttons:
+            btn.setVisible(policy_name in policies)
+
+        # 控制安全模式單選按鈕的可見性
+        mode_buttons = [
+            (self.rb_mode_none, "None"),
+            (self.rb_mode_sign, "Sign"),
+            (self.rb_mode_sign_encrypt, "SignAndEncrypt"),
+        ]
+        for btn, mode_name in mode_buttons:
+            btn.setVisible(mode_name in modes)
+
+    def _show_all_policies_and_modes(self):
+        """顯示所有安全策略和模式（沒有過濾）"""
+        # 顯示所有安全策略
+        for btn in [self.policy_rb_none, self.policy_rb_basic128, 
+                    self.policy_rb_basic256, self.policy_rb_basic256sha]:
+            btn.setVisible(True)
+        
+        # 顯示所有安全模式
+        for btn in [self.rb_mode_none, self.rb_mode_sign, self.rb_mode_sign_encrypt]:
+            btn.setVisible(True)
+
+    def _normalize_policy_name(self, fragment: str) -> str:
+        """將各種 SecurityPolicy 片段標準化為 UI 使用的規範名稱
+        
+        例： 
+            Basic128RSA15 -> Basic128Rsa15
+            Basic256Sha256 -> Basic256Sha256
+            None -> None
+        """
+        if not fragment:
+            return ""
+        
+        # 轉為小寫並移除非字母數字字元進行比對
+        normalized = re.sub(r'[^0-9a-z]', '', fragment.lower())
+        
+        # 根據關鍵字識別策略
+        if normalized == "none":
+            return "None"
+        if "128" in normalized:
+            return "Basic128Rsa15"
+        if "sha256" in normalized or ("sha" in normalized and "256" in normalized):
+            return "Basic256Sha256"
+        if "256" in normalized and "128" not in normalized:
+            return "Basic256"
+        
+        # 無法識別時，嘗試返回原始片段
+        return fragment if fragment in ["None", "Basic128Rsa15", "Basic256", "Basic256Sha256"] else ""
+
+    def _normalize_mode_name(self, name: str) -> str:
+        """將安全模式名稱標準化為規範鍵值: None, Sign, SignAndEncrypt"""
+        if not name:
+            return ""
+        
+        # 移除前綴和特殊字元，轉為小寫進行比對
+        cleaned = name.lower()
+        cleaned = cleaned.replace("messagesecuritymode.", "")
+        cleaned = cleaned.replace("_", "").replace(" ", "")
+        
+        # 識別模式（注意順序，SignAndEncrypt 要在 Sign 之前）
+        if "signandencrypt" in cleaned or "signencrypt" in cleaned:
+            return "SignAndEncrypt"
+        if "sign" in cleaned and "encrypt" not in cleaned:
+            return "Sign"
+        if "none" in cleaned:
+            return "None"
+        
+        # 無法識別
+        return ""
+
+    def _on_apply(self):
+        """按下 Apply 時接受設定對話框"""
+        self.accept()
+
+
 class ScheduleEditDialog(QDialog):
     """排程編輯對話框"""
 
     def __init__(self, parent=None, schedule: Dict[str, Any] = None):
         super().__init__(parent)
         self.schedule = schedule
+
+        # 初始化OPC設定
+        self.opc_security_policy = schedule.get("opc_security_policy", "None") if schedule else "None"
+        self.opc_security_mode = schedule.get("opc_security_mode", "None") if schedule else "None"
+        self.opc_username = schedule.get("opc_username", "") if schedule else ""
+        self.opc_password = schedule.get("opc_password", "") if schedule else ""
+        self.opc_timeout = schedule.get("opc_timeout", 10) if schedule else 10
+
         self.setup_ui()
         self.apply_style()
 
@@ -1380,6 +2200,12 @@ class ScheduleEditDialog(QDialog):
         self.opc_protocol_label = QLabel("opc.tcp://")
         self.opc_protocol_label.setStyleSheet("color: #666; padding-right: 5px;")
         opc_url_layout.insertWidget(0, self.opc_protocol_label)
+        # 添加OPC設定按鈕
+        self.btn_opc_settings = QPushButton("設定...")
+        self.btn_opc_settings.setToolTip("OPC UA 連線設定")
+        self.btn_opc_settings.clicked.connect(self.configure_opc_settings)
+        self.btn_opc_settings.setMaximumWidth(80)
+        opc_url_layout.addWidget(self.btn_opc_settings)
         basic_layout.addLayout(opc_url_layout, 1, 1)
 
         basic_layout.addWidget(QLabel("Node ID:"), 2, 0)
@@ -1491,6 +2317,42 @@ class ScheduleEditDialog(QDialog):
             QLineEdit:focus {
                 border: 2px solid #0078d4;
             }
+            QRadioButton {
+                color: #333;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #999999;
+                border-radius: 9px;
+                background-color: white;
+            }
+            QRadioButton::indicator:hover {
+                border: 2px solid #0078d4;
+                background-color: #f0f0f0;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #0078d4;
+                border: 2px solid #0078d4;
+            }
+            QCheckBox {
+                color: #333;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #999999;
+                border-radius: 2px;
+                background-color: white;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #0078d4;
+                background-color: #f0f0f0;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border: 2px solid #0078d4;
+            }
         """)
 
     def _apply_dark_style(self):
@@ -1534,6 +2396,42 @@ class ScheduleEditDialog(QDialog):
             QLineEdit:focus {
                 border: 2px solid #0e639c;
             }
+            QRadioButton {
+                color: #cccccc;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666666;
+                border-radius: 9px;
+                background-color: #1e1e1e;
+            }
+            QRadioButton::indicator:hover {
+                border: 2px solid #0e639c;
+                background-color: #252526;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+            }
+            QCheckBox {
+                color: #cccccc;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #666666;
+                border-radius: 2px;
+                background-color: #1e1e1e;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #0e639c;
+                background-color: #252526;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+            }
         """)
 
     def load_data(self):
@@ -1548,6 +2446,13 @@ class ScheduleEditDialog(QDialog):
         self.target_value_edit.setText(self.schedule.get("target_value", ""))
         self.rrule_display.setText(self.schedule.get("rrule_str", ""))
 
+    def _normalize_opc_url(self) -> str:
+        """規範化 OPC URL：添加 opc.tcp:// 前綴（如果需要）"""
+        opc_url = self.opc_url_edit.text().strip()
+        if opc_url and not opc_url.startswith("opc.tcp://"):
+            opc_url = f"opc.tcp://{opc_url}"
+        return opc_url
+
     def edit_recurrence(self):
         """編輯週期規則"""
         current_rrule = self.rrule_display.text()
@@ -1555,7 +2460,7 @@ class ScheduleEditDialog(QDialog):
         if rrule:
             self.rrule_display.setText(rrule)
 
-    def get_data(self) -> Dict[str, str]:
+    def get_data(self) -> Dict[str, Any]:
         """取得編輯的資料"""
         # 自動添加 opc.tcp:// 前綴
         opc_url = self.opc_url_edit.text().strip()
@@ -1568,14 +2473,16 @@ class ScheduleEditDialog(QDialog):
             "node_id": self.node_id_edit.text(),
             "target_value": self.target_value_edit.text(),
             "rrule_str": self.rrule_display.text(),
+            "opc_security_policy": self.opc_security_policy,
+            "opc_security_mode": self.opc_security_mode,
+            "opc_username": self.opc_username,
+            "opc_password": self.opc_password,
+            "opc_timeout": self.opc_timeout,
         }
 
     def browse_opcua_nodes(self):
         """瀏覽 OPC UA 節點"""
-        # 取得目前的 OPC URL
-        opc_url = self.opc_url_edit.text().strip()
-        if opc_url and not opc_url.startswith("opc.tcp://"):
-            opc_url = f"opc.tcp://{opc_url}"
+        opc_url = self._normalize_opc_url()
 
         if not opc_url:
             QMessageBox.warning(
@@ -1591,6 +2498,28 @@ class ScheduleEditDialog(QDialog):
             selected_node = dialog.get_selected_node()
             if selected_node:
                 self.node_id_edit.setText(selected_node)
+
+    def configure_opc_settings(self):
+        """設定 OPC UA 連線參數"""
+        opc_url = self._normalize_opc_url()
+
+        dialog = OPCSettingsDialog(
+            self,
+            self.opc_security_policy,
+            self.opc_username,
+            self.opc_password,
+            self.opc_timeout,
+            self.opc_security_mode,
+            opc_url=opc_url,
+        )
+
+        if dialog.exec() == QDialog.Accepted:
+            settings = dialog.get_settings()
+            self.opc_security_policy = settings["security_policy"]
+            self.opc_security_mode = settings["security_mode"]
+            self.opc_username = settings["username"]
+            self.opc_password = settings["password"]
+            self.opc_timeout = settings["timeout"]
 
 
 async def main():

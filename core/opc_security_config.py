@@ -3,6 +3,7 @@ OPC UA 安全設定配置檔案
 提供不同安全等級的配置選項
 """
 
+import os
 from dataclasses import dataclass
 from typing import Optional, List
 from enum import Enum
@@ -101,87 +102,3 @@ class OPCSecurityPolicy:
     def get_high_security(cls) -> str:
         """取得高安全策略"""
         return "Aes128Sha256RsaOaep"
-
-
-class SecurityConfigFactory:
-    """安全配置工廠"""
-
-    @staticmethod
-    def create_test_config(url: str) -> OPCSecurityConfig:
-        """創建測試環境配置（無安全）"""
-        return OPCSecurityConfig(
-            url=url,
-            security_level=SecurityLevel.NONE,
-            security_policy="None",
-            message_security_mode="None",
-            use_anonymous=True,
-        )
-
-    @staticmethod
-    def create_basic_config(
-        url: str, username: str, password: str
-    ) -> OPCSecurityConfig:
-        """創建基本安全配置（使用者名稱+密碼+加密）"""
-        return OPCSecurityConfig(
-            url=url,
-            security_level=SecurityLevel.BASIC,
-            security_policy="Basic256Sha256",
-            message_security_mode="SignAndEncrypt",
-            username=username,
-            password=password,
-        )
-
-    @staticmethod
-    def create_standard_config(
-        url: str,
-        cert_path: str,
-        key_path: str,
-    ) -> OPCSecurityConfig:
-        """創建標準安全配置（X.509 憑證）"""
-        return OPCSecurityConfig(
-            url=url,
-            security_level=SecurityLevel.STANDARD,
-            security_policy="Basic256Sha256",
-            message_security_mode="SignAndEncrypt",
-            client_certificate_path=cert_path,
-            client_private_key_path=key_path,
-        )
-
-    @staticmethod
-    def create_high_security_config(
-        url: str,
-        cert_path: str,
-        key_path: str,
-        ca_path: str,
-    ) -> OPCSecurityConfig:
-        """創建高安全配置（雙向憑證驗證）"""
-        return OPCSecurityConfig(
-            url=url,
-            security_level=SecurityLevel.HIGH,
-            security_policy="Aes128Sha256RsaOaep",
-            message_security_mode="SignAndEncrypt",
-            client_certificate_path=cert_path,
-            client_private_key_path=key_path,
-            trusted_ca_path=ca_path,
-        )
-
-
-# 使用範例
-if __name__ == "__main__":
-    # 範例 1: 測試環境
-    test_config = SecurityConfigFactory.create_test_config("opc.tcp://localhost:4840")
-    print(f"測試配置: {test_config}")
-
-    # 範例 2: 基本安全（使用者名稱+密碼）
-    basic_config = SecurityConfigFactory.create_basic_config(
-        "opc.tcp://192.168.1.100:4840", username="operator", password="SecureP@ss123!"
-    )
-    print(f"基本安全配置: {basic_config}")
-
-    # 範例 3: 標準安全（X.509 憑證）
-    standard_config = SecurityConfigFactory.create_standard_config(
-        "opc.tcp://192.168.1.100:4840",
-        cert_path="./certs/client_cert.pem",
-        key_path="./certs/client_key.pem",
-    )
-    print(f"標準安全配置: {standard_config}")

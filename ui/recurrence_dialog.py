@@ -540,10 +540,13 @@ class RecurrenceDialog(QDialog):
         self.radio_monthly.toggled.connect(self.on_frequency_changed)
         self.radio_yearly.toggled.connect(self.on_frequency_changed)
 
-        # 時間變更時更新期間
-        self.start_time_edit.timeChanged.connect(self.update_duration)
-        self.end_time_edit.timeChanged.connect(self.update_duration)
+        # 時間變更時自動計算
+        self.start_time_edit.timeChanged.connect(self.on_start_time_changed)
+        self.end_time_edit.timeChanged.connect(self.on_end_time_changed)
         self.duration_combo.currentIndexChanged.connect(self.on_duration_changed)
+
+        # 初始化時更新期間顯示
+        self.update_duration_from_times()
 
     def on_frequency_changed(self):
         """頻率選擇變更時顯示對應的詳細設定"""
@@ -552,7 +555,31 @@ class RecurrenceDialog(QDialog):
         self.monthly_widget.setVisible(self.radio_monthly.isChecked())
         self.yearly_widget.setVisible(self.radio_yearly.isChecked())
 
-    def update_duration(self):
+    def on_start_time_changed(self):
+        """開始時間變更時，保持期間不變，更新結束時間"""
+        # 暫時阻止 duration_combo 信號以避免遞迴
+        self.duration_combo.blockSignals(True)
+        
+        duration = self.duration_combo.currentData()
+        if duration is not None:
+            start = self.start_time_edit.time()
+            start_minutes = start.hour() * 60 + start.minute()
+            end_minutes = start_minutes + duration
+
+            end_hour = (end_minutes // 60) % 24
+            end_minute = end_minutes % 60
+
+            self.end_time_edit.blockSignals(True)
+            self.end_time_edit.setTime(QTime(end_hour, end_minute))
+            self.end_time_edit.blockSignals(False)
+        
+        self.duration_combo.blockSignals(False)
+
+    def on_end_time_changed(self):
+        """結束時間變更時，反推期間"""
+        self.update_duration_from_times()
+
+    def update_duration_from_times(self):
         """根據開始和結束時間計算期間"""
         start = self.start_time_edit.time()
         end = self.end_time_edit.time()
@@ -570,6 +597,10 @@ class RecurrenceDialog(QDialog):
         index = self.duration_combo.findData(duration)
         if index >= 0:
             self.duration_combo.setCurrentIndex(index)
+        else:
+            # 如果期間不在預設列表中，添加自訂期間
+            self.duration_combo.addItem(f"{duration} 分", duration)
+            self.duration_combo.setCurrentIndex(self.duration_combo.count() - 1)
         self.duration_combo.blockSignals(False)
 
     def on_duration_changed(self):
@@ -583,7 +614,9 @@ class RecurrenceDialog(QDialog):
             end_hour = (end_minutes // 60) % 24
             end_minute = end_minutes % 60
 
+            self.end_time_edit.blockSignals(True)
             self.end_time_edit.setTime(QTime(end_hour, end_minute))
+            self.end_time_edit.blockSignals(False)
 
     def on_ok_clicked(self):
         """確定按點擊"""

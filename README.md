@@ -15,16 +15,15 @@ UI 框架: PySide6 (Qt for Python) - 打造現代化 Office/Windows 11 視覺風
 
 3. 專案目錄架構
 CalendarUA/
-├── main.py                # 程式進入點
+├── CalendarUA.py          # 程式進入點：包含主視窗與所有對話框
 ├── requirements.txt       # 專案依賴庫清單
+├── README.md              # 專案說明文檔
 ├── ui/
-│   ├── main_window.py     # 主介面：包含日曆檢視與排程清單
-│   ├── recurrence_dialog.py # 週期性設定對話框 (仿 Office 週期規則視窗)
-│   └── tag_config.py      # OPC UA 連線與 MySQL 參數設定介面
+│   └── recurrence_dialog.py # 週期性設定對話框 (仿 Office 週期規則視窗)
 ├── core/
-│   ├── scheduler.py       # 背景排程引擎：負責檢查時間並觸發任務
-│   ├── opc_handler.py     # OPC UA 讀寫邏輯與例外處理
-│   └── rrule_parser.py    # 邏輯轉換：將 UI 設定轉為 RRULE 字串
+│   ├── opc_handler.py         # OPC UA 讀寫邏輯與例外處理
+│   ├── opc_security_config.py # OPC UA 安全配置定義
+│   └── rrule_parser.py        # 邏輯轉換：將 UI 設定轉為 RRULE 字串
 └── database/
     └── sqlite_manager.py   # SQLite 資料庫 CRUD 操作
 
@@ -38,13 +37,19 @@ opc_url | TEXT | OPC UA 伺服器位址
 node_id | TEXT | OPC UA Tag NodeID
 target_value | TEXT | 要寫入的數值
 rrule_str | TEXT | RRULE 規則字串
+opc_security_policy | TEXT | OPC 安全策略 (None/Basic256Sha256 等)
+opc_security_mode | TEXT | OPC 安全模式 (None/Sign/SignAndEncrypt)
+opc_username | TEXT | OPC 使用者名稱
+opc_password | TEXT | OPC 密碼
+opc_timeout | INTEGER | 連線超時 (秒)
 is_enabled | INTEGER | 是否啟用 (1: 啟用, 0: 停用)
+created_at | TIMESTAMP | 建立時間
+updated_at | TIMESTAMP | 更新時間
 
-5. 開發指令建議 (Copilot Prompts)
-在 VS Code 中開發時，建議使用以下指令引導 Copilot：
+## 5. 主要功能
 
-初始化資料庫: 「請參考 README.md，使用 mysql-connector-python 撰寫 database/mysql_manager.py，需包含建立 schedules 表格的功能。」
-
-建立 UI: 「請使用 PySide6 建立 ui/recurrence_dialog.py，介面風格需模仿 Outlook 的週期性設定，並能回傳 RRULE 字串。」
-
-處理排程: 「請寫一段程式碼使用 python-dateutil 解析 rrule_str，並計算下一次觸發的日期時間。」
+- 📅 **Office 風格行事曆**：直觀的日期選擇和排程查看
+- 🔄 **RRULE 週期設定**：支持每日、每週、每月、每年等複雜週期規則
+- 🔒 **OPC UA 安全連線**：支持多種安全策略和驗證方式
+- 💾 **SQLite 資料庫**：輕量級本地儲存，無需配置伺服器
+- ⚙️ **自動伺服器檢測**：自動偵測 OPC UA 伺服器支持的安全模式

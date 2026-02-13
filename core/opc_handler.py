@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Optional, Any, Union
 from asyncua import Client, ua
 from asyncua.common.node import Node
@@ -120,10 +121,18 @@ class OPCHandler:
 
             # 設定安全策略
             if self.security_policy == "Basic256Sha256":
+                from asyncua.crypto.security_policies import SecurityPolicyBasic256Sha256
                 self.client.set_security_policy(SecurityPolicyBasic256Sha256)
                 logger.info("已設定 Basic256Sha256 安全策略")
-
-            # 可以擴充更多安全策略...
+            elif self.security_policy == "Aes128Sha256RsaOaep":
+                from asyncua.crypto.security_policies import SecurityPolicyAes128Sha256RsaOaep
+                self.client.set_security_policy(SecurityPolicyAes128Sha256RsaOaep)
+                logger.info("已設定 Aes128Sha256RsaOaep 安全策略")
+            elif self.security_policy == "Aes256Sha256RsaPss":
+                from asyncua.crypto.security_policies import SecurityPolicyAes256Sha256RsaPss
+                self.client.set_security_policy(SecurityPolicyAes256Sha256RsaPss)
+                logger.info("已設定 Aes256Sha256RsaPss 安全策略")
+            # None 或其他值表示不設定安全策略（無加密）
 
         except Exception as e:
             logger.error(f"配置安全設定失敗: {e}")
@@ -283,7 +292,7 @@ class OPCHandler:
 # 使用範例
 async def main():
     """測試範例"""
-    opc_url = "opc.tcp://localhost:4840"
+    opc_url = os.environ.get("OPC_DEFAULT_URL", "opc.tcp://localhost:4840")
 
     async with OPCHandler(opc_url) as handler:
         if handler.is_connected:

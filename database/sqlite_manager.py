@@ -6,6 +6,7 @@ SQLite 資料庫管理模組
 import sqlite3
 import logging
 from pathlib import Path
+import os
 from typing import List, Dict, Optional, Any
 from contextlib import contextmanager
 
@@ -76,6 +77,11 @@ class SQLiteManager:
             node_id TEXT NOT NULL,
             target_value TEXT NOT NULL,
             rrule_str TEXT NOT NULL,
+            opc_security_policy TEXT DEFAULT 'None',
+            opc_security_mode TEXT DEFAULT 'None',
+            opc_username TEXT DEFAULT '',
+            opc_password TEXT DEFAULT '',
+            opc_timeout INTEGER DEFAULT 10,
             is_enabled INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -98,11 +104,64 @@ class SQLiteManager:
 
                 conn.commit()
                 logger.info("資料庫初始化成功，schedules 表格已建立")
+                
+                # 執行遷移以添加缺失的欄位
+                self._migrate_db()
+                
                 return True
 
         except sqlite3.Error as e:
             logger.error(f"資料庫初始化失敗: {e}")
             return False
+
+    def _migrate_db(self) -> None:
+        """
+        遷移資料庫以添加新的欄位
+        檢查並添加缺失的欄位（用於舊版本升級）
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 檢查 opc_security_mode 欄位是否存在
+                cursor.execute("PRAGMA table_info(schedules)")
+                columns = [column[1] for column in cursor.fetchall()]
+                
+                # 添加缺失的欄位
+                if "opc_security_mode" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN opc_security_mode TEXT DEFAULT 'None'"
+                    )
+                    logger.info("已添加 opc_security_mode 欄位")
+                
+                if "opc_security_policy" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN opc_security_policy TEXT DEFAULT 'None'"
+                    )
+                    logger.info("已添加 opc_security_policy 欄位")
+                
+                if "opc_username" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN opc_username TEXT DEFAULT ''"
+                    )
+                    logger.info("已添加 opc_username 欄位")
+                
+                if "opc_password" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN opc_password TEXT DEFAULT ''"
+                    )
+                    logger.info("已添加 opc_password 欄位")
+                
+                if "opc_timeout" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN opc_timeout INTEGER DEFAULT 10"
+                    )
+                    logger.info("已添加 opc_timeout 欄位")
+                
+                conn.commit()
+                
+        except sqlite3.Error as e:
+            logger.error(f"資料庫遷移失敗: {e}")
 
     def add_schedule(
         self,
@@ -111,6 +170,11 @@ class SQLiteManager:
         node_id: str,
         target_value: str,
         rrule_str: str,
+        opc_security_policy: str = "None",
+        opc_security_mode: str = "None",
+        opc_username: str = "",
+        opc_password: str = "",
+        opc_timeout: int = 10,
         is_enabled: int = 1,
     ) -> Optional[int]:
         """
@@ -122,14 +186,20 @@ class SQLiteManager:
             node_id: OPC UA Tag NodeID
             target_value: 要寫入的數值
             rrule_str: RRULE 規則字串
+            opc_security_policy: OPC安全策略
+            opc_security_mode: OPC安全模式 (None/Sign/SignAndEncrypt)
+            opc_username: OPC使用者名稱
+            opc_password: OPC密碼
+            opc_timeout: 連線超時秒數
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
 
         Returns:
             Optional[int]: 新增排程的 ID，失敗時回傳 None
         """
         insert_sql = """
-        INSERT INTO schedules (task_name, opc_url, node_id, target_value, rrule_str, is_enabled)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO schedules (task_name, opc_url, node_id, target_value, rrule_str,
+                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, is_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         try:
@@ -137,7 +207,8 @@ class SQLiteManager:
                 cursor = conn.cursor()
                 cursor.execute(
                     insert_sql,
-                    (task_name, opc_url, node_id, target_value, rrule_str, is_enabled),
+                    (task_name, opc_url, node_id, target_value, rrule_str,
+                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, is_enabled),
                 )
                 conn.commit()
                 new_id = cursor.lastrowid
@@ -221,6 +292,11 @@ class SQLiteManager:
         node_id: str,
         target_value: str,
         rrule_str: str,
+        opc_security_policy: str = "None",
+        opc_security_mode: str = "None",
+        opc_username: str = "",
+        opc_password: str = "",
+        opc_timeout: int = 10,
         is_enabled: int = 1,
     ) -> Optional[int]:
         """
@@ -232,6 +308,11 @@ class SQLiteManager:
             node_id: OPC UA Tag NodeID
             target_value: 要寫入的數值
             rrule_str: RRULE 規則字串
+            opc_security_policy: OPC安全策略
+            opc_security_mode: OPC安全模式 (None/Sign/SignAndEncrypt)
+            opc_username: OPC使用者名稱
+            opc_password: OPC密碼
+            opc_timeout: 連線超時秒數
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
 
         Returns:
@@ -243,6 +324,11 @@ class SQLiteManager:
             node_id=node_id,
             target_value=target_value,
             rrule_str=rrule_str,
+            opc_security_policy=opc_security_policy,
+            opc_security_mode=opc_security_mode,
+            opc_username=opc_username,
+            opc_password=opc_password,
+            opc_timeout=opc_timeout,
             is_enabled=is_enabled,
         )
 
@@ -291,6 +377,11 @@ class SQLiteManager:
             "node_id",
             "target_value",
             "rrule_str",
+            "opc_security_policy",
+            "opc_security_mode",
+            "opc_username",
+            "opc_password",
+            "opc_timeout",
             "is_enabled",
         }
 
@@ -335,36 +426,3 @@ class SQLiteManager:
             bool: 操作成功回傳 True，否則回傳 False
         """
         return self.update_schedule(schedule_id, is_enabled=is_enabled)
-
-
-# 使用範例
-if __name__ == "__main__":
-    # 初始化資料庫管理器
-    db = SQLiteManager()
-
-    # 初始化資料庫（建立表格）
-    if db.init_db():
-        print("✓ 資料庫初始化成功")
-
-        # 新增排程範例
-        schedule_id = db.add_schedule(
-            task_name="每日早班開機",
-            opc_url="opc.tcp://localhost:4840",
-            node_id="ns=2;i=1001",
-            target_value="1",
-            rrule_str="FREQ=DAILY;BYHOUR=8;BYMINUTE=0",
-            is_enabled=1,
-        )
-
-        if schedule_id:
-            print(f"✓ 排程新增成功，ID: {schedule_id}")
-
-            # 查詢所有排程
-            schedules = db.get_all_schedules()
-            print(f"✓ 目前共有 {len(schedules)} 筆排程")
-
-            # 刪除測試排程
-            # if db.delete_schedule(schedule_id):
-            #     print(f"✓ 排程 {schedule_id} 刪除成功")
-    else:
-        print("✗ 資料庫初始化失敗")

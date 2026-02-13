@@ -26,8 +26,27 @@ class RRuleParser:
             Optional[rrule]: rrule 物件，解析失敗回傳 None
         """
         try:
+            # 從 RRULE 字串中提取 DTSTART
+            dtstart_str = None
+            if "DTSTART:" in rrule_str:
+                parts = rrule_str.split(";")
+                rrule_parts = []
+                for part in parts:
+                    if part.startswith("DTSTART:"):
+                        dtstart_str = part.split(":", 1)[1]
+                    else:
+                        rrule_parts.append(part)
+                rrule_str = ";".join(rrule_parts)
+
             if dtstart is None:
-                dtstart = datetime.now().replace(second=0, microsecond=0)
+                if dtstart_str:
+                    # 解析 DTSTART 字串
+                    try:
+                        dtstart = datetime.strptime(dtstart_str, "%Y%m%dT%H%M%S")
+                    except ValueError:
+                        dtstart = datetime.now().replace(second=0, microsecond=0)
+                else:
+                    dtstart = datetime.now().replace(second=0, microsecond=0)
 
             # 確保 RRULE 字串格式正確
             if not rrule_str.upper().startswith("RRULE:"):
