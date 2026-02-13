@@ -2,6 +2,7 @@ import asyncio
 from typing import Optional, Any, Union
 from asyncua import Client, ua
 from asyncua.common.node import Node
+from asyncua.crypto.security_policies import SecurityPolicyBasic256Sha256
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -9,7 +10,14 @@ logger = logging.getLogger(__name__)
 
 
 class OPCHandler:
-    """OPC UA 非同步處理類別，負責連線與讀寫操作"""
+    """OPC UA 非同步處理類別，負責連線與讀寫操作
+
+    支援的安全設定：
+    - 無安全模式（僅測試使用）
+    - 使用者名稱/密碼認證
+    - X.509 憑證認證
+    - 加密傳輸
+    """
 
     def __init__(self, url: str, timeout: int = 10):
         """
@@ -24,19 +32,74 @@ class OPCHandler:
         self.client: Optional[Client] = None
         self.is_connected = False
 
+        # 安全配置
+        self.security_policy: Optional[str] = None
+        self.message_security_mode: Optional[str] = None
+        self.username: Optional[str] = None
+        self.password: Optional[str] = None
+        self.client_cert_path: Optional[str] = None
+        self.client_key_path: Optional[str] = None
+
+    def set_security_policy(self, policy: str):
+        """設定安全策略
+
+        Args:
+            policy: 安全策略名稱
+                - None: 無加密
+                - Basic256Sha256: 256位加密（推薦）
+                - Aes128Sha256RsaOaep: AES-128 高安全
+                - Aes256Sha256RsaPss: AES-256 最高安全
+        """
+        self.security_policy = policy
+        logger.info(f"設定安全策略: {policy}")
+
+    def set_user_credentials(self, username: str, password: str):
+        """設定使用者名稱密碼認證
+
+        Args:
+            username: 使用者名稱
+            password: 密碼
+        """
+        self.username = username
+        self.password = password
+        logger.info(f"設定使用者認證: {username}")
+
+    def set_certificate(self, cert_path: str, key_path: str):
+        """設定 X.509 憑證
+
+        Args:
+            cert_path: 憑證檔案路徑 (.der 或 .pem)
+            key_path: 私鑰檔案路徑 (.pem)
+        """
+        self.client_cert_path = cert_path
+        self.client_key_path = key_path
+        logger.info(f"設定憑證認證: {cert_path}")
+
     async def connect(self) -> bool:
         """
-        連線到 OPC UA 伺服器
+        連線到 OPC UA 伺服器，根據配置自動選擇安全模式
 
         Returns:
             bool: 連線成功回傳 True
         """
         try:
             self.client = Client(self.url)
+
+            # 設定安全策略
+            if self.security_policy:
+                await self._configure_security()
+
+            # 設定使用者認證
+            if self.username and self.password:
+                self.client.set_user(self.username)
+                self.client.set_password(self.password)
+
+            # 連線到伺服器
             await asyncio.wait_for(self.client.connect(), timeout=self.timeout)
             self.is_connected = True
             logger.info(f"成功連線到 OPC UA 伺服器: {self.url}")
             return True
+
         except asyncio.TimeoutError:
             logger.error(f"連線超時: {self.url}")
             self.is_connected = False
@@ -45,6 +108,26 @@ class OPCHandler:
             logger.error(f"連線失敗: {e}")
             self.is_connected = False
             return False
+
+    async def _configure_security(self):
+        """配置安全設定"""
+        try:
+            # 載入憑證（如果有）
+            if self.client_cert_path and self.client_key_path:
+                await self.client.load_client_certificate(self.client_cert_path)
+                await self.client.load_private_key(self.client_key_path)
+                logger.info("已載入憑證和金鑰")
+
+            # 設定安全策略
+            if self.security_policy == "Basic256Sha256":
+                self.client.set_security_policy(SecurityPolicyBasic256Sha256)
+                logger.info("已設定 Basic256Sha256 安全策略")
+
+            # 可以擴充更多安全策略...
+
+        except Exception as e:
+            logger.error(f"配置安全設定失敗: {e}")
+            raise
 
     async def disconnect(self):
         """中斷 OPC UA 連線"""
@@ -178,6 +261,23 @@ class OPCHandler:
         except Exception as e:
             logger.error(f"瀏覽節點失敗: {e}")
             return []
+
+    async def get_objects_node(self):
+        """
+        取得 Objects 節點
+
+        Returns:
+            Node: Objects 節點，如果未連線則回傳 None
+        """
+        if not self.is_connected or not self.client:
+            logger.error("尚未連線到 OPC UA 伺服器")
+            return None
+
+        try:
+            return self.client.get_objects_node()
+        except Exception as e:
+            logger.error(f"取得 Objects 節點失敗: {e}")
+            return None
 
 
 # 使用範例

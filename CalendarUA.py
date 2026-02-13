@@ -1,0 +1,1619 @@
+#!/usr/bin/env python3
+"""
+CalendarUA - 工業自動化排程管理系統主程式
+採用 PySide6 開發，結合 Office/Outlook 風格行事曆介面
+"""
+
+import sys
+import asyncio
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List
+
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QSplitter,
+    QCalendarWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QPushButton,
+    QLabel,
+    QLineEdit,
+    QGroupBox,
+    QMessageBox,
+    QHeaderView,
+    QMenu,
+    QSystemTrayIcon,
+    QStyle,
+    QDialog,
+    QComboBox,
+    QSpinBox,
+    QTextEdit,
+    QStatusBar,
+    QToolBar,
+    QTreeWidget,
+    QTreeWidgetItem,
+)
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread
+from PySide6.QtGui import QAction, QIcon, QColor, QFont
+import qasync
+
+from database.sqlite_manager import SQLiteManager
+from core.opc_handler import OPCHandler
+from core.rrule_parser import RRuleParser
+from ui.recurrence_dialog import RecurrenceDialog, show_recurrence_dialog
+
+
+class SchedulerWorker(QThread):
+    """背景排程工作執行緒"""
+
+    trigger_task = Signal(dict)
+
+    def __init__(self, db_manager: SQLiteManager, check_interval: int = 30):
+        super().__init__()
+        self.db_manager = db_manager
+        self.check_interval = check_interval
+        self.running = True
+        self.last_check = datetime.now()
+
+    def run(self):
+        """持續檢查排程"""
+        while self.running:
+            try:
+                current_time = datetime.now()
+
+                # 取得所有啟用的排程
+                schedules = self.db_manager.get_all_schedules(enabled_only=True)
+
+                for schedule in schedules:
+                    if self.should_trigger(schedule, current_time):
+                        self.trigger_task.emit(schedule)
+
+                self.last_check = current_time
+
+                # 休眠指定秒數
+                for _ in range(self.check_interval):
+                    if not self.running:
+                        break
+                    self.msleep(1000)
+
+            except Exception as e:
+                print(f"排程檢查錯誤: {e}")
+                self.msleep(5000)
+
+    def should_trigger(self, schedule: Dict[str, Any], current_time: datetime) -> bool:
+        """檢查是否應該觸發排程"""
+        rrule_str = schedule.get("rrule_str", "")
+        if not rrule_str:
+            return False
+
+        # 使用 RRuleParser 檢查是否為觸發時間
+        return RRuleParser.is_trigger_time(
+            rrule_str, current_time, tolerance_seconds=30
+        )
+
+    def stop(self):
+        """停止工作執行緒"""
+        self.running = False
+        self.wait(2000)
+
+
+class CalendarUA(QMainWindow):
+    """CalendarUA 主視窗"""
+
+    def __init__(self):
+        super().__init__()
+
+        self.db_manager: Optional[SQLiteManager] = None
+        self.opc_handler: Optional[OPCHandler] = None
+        self.scheduler_worker: Optional[SchedulerWorker] = None
+        self.schedules: List[Dict[str, Any]] = []
+
+        # 主題模式: "light", "dark", "system"
+        self.current_theme = "system"
+
+        self.setup_ui()
+        self.apply_modern_style()
+        self.setup_connections()
+        self.setup_system_tray()
+
+        # 初始化資料庫連線
+        self.init_database()
+
+        # 設定系統主題監聽
+        self.setup_theme_listener()
+
+    def setup_ui(self):
+        """設定使用者介面"""
+        self.setWindowTitle("CalendarUA - 工業自動化排程管理系統")
+        self.setMinimumSize(1200, 800)
+
+        # 建立中央widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        # 建立分割器
+        splitter = QSplitter(Qt.Horizontal)
+
+        # 左側：日曆視圖
+        left_panel = self.create_left_panel()
+        splitter.addWidget(left_panel)
+
+        # 右側：排程列表與控制
+        right_panel = self.create_right_panel()
+        splitter.addWidget(right_panel)
+
+        # 設定分割比例
+        splitter.setSizes([400, 800])
+
+        main_layout.addWidget(splitter)
+
+        # 建立選單列
+        self.create_menu_bar()
+
+        # 建立工具列
+        self.create_tool_bar()
+
+        # 建立狀態列
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("就緒")
+
+    def create_left_panel(self) -> QWidget:
+        """建立左側日曆面板"""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # 日曆widget
+        self.calendar = QCalendarWidget()
+        self.calendar.setGridVisible(True)
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.calendar.setHorizontalHeaderFormat(QCalendarWidget.SingleLetterDayNames)
+
+        # 設定日曆樣式
+        self.calendar.setStyleSheet("""
+            QCalendarWidget {
+                background-color: white;
+            }
+            QCalendarWidget QTableView {
+                selection-background-color: #0078d4;
+                selection-color: white;
+            }
+            QCalendarWidget QWidget#qt_calendar_navigationbar {
+                background-color: #0078d4;
+            }
+            QCalendarWidget QToolButton {
+                color: white;
+                background-color: transparent;
+                border: none;
+                font-weight: bold;
+            }
+        """)
+
+        layout.addWidget(self.calendar)
+
+        # 當天排程摘要
+        summary_group = QGroupBox("當天排程")
+        summary_layout = QVBoxLayout(summary_group)
+
+        self.daily_summary = QTextEdit()
+        self.daily_summary.setReadOnly(True)
+        self.daily_summary.setMaximumHeight(150)
+        summary_layout.addWidget(self.daily_summary)
+
+        layout.addWidget(summary_group)
+
+        return panel
+
+    def create_right_panel(self) -> QWidget:
+        """建立右側排程列表面板"""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # 按鈕工具列
+        button_layout = QHBoxLayout()
+
+        self.btn_add = QPushButton("+ 新增排程")
+        self.btn_add.setToolTip("新增排程任務")
+        self.btn_add.clicked.connect(self.add_schedule)
+
+        self.btn_edit = QPushButton("✎ 編輯")
+        self.btn_edit.setToolTip("編輯選取的排程")
+        self.btn_edit.clicked.connect(self.edit_schedule)
+        self.btn_edit.setEnabled(False)
+
+        self.btn_delete = QPushButton("✕ 刪除")
+        self.btn_delete.setToolTip("刪除選取的排程")
+        self.btn_delete.clicked.connect(self.delete_schedule)
+        self.btn_delete.setEnabled(False)
+
+        self.btn_refresh = QPushButton("↻ 重新整理")
+        self.btn_refresh.setToolTip("重新載入排程列表")
+        self.btn_refresh.clicked.connect(self.load_schedules)
+
+        button_layout.addWidget(self.btn_add)
+        button_layout.addWidget(self.btn_edit)
+        button_layout.addWidget(self.btn_delete)
+        button_layout.addStretch()
+        button_layout.addWidget(self.btn_refresh)
+
+        layout.addLayout(button_layout)
+
+        # 排程表格
+        self.schedule_table = QTableWidget()
+        self.schedule_table.setColumnCount(7)
+        self.schedule_table.setHorizontalHeaderLabels(
+            ["ID", "任務名稱", "OPC URL", "Node ID", "目標值", "週期規則", "啟用"]
+        )
+
+        # 設定表格樣式
+        self.schedule_table.horizontalHeader().setStretchLastSection(True)
+        self.schedule_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
+        self.schedule_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.schedule_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.schedule_table.setAlternatingRowColors(True)
+        self.schedule_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.schedule_table.customContextMenuRequested.connect(
+            self.show_table_context_menu
+        )
+        self.schedule_table.itemSelectionChanged.connect(self.on_selection_changed)
+
+        layout.addWidget(self.schedule_table)
+
+        # 連線狀態面板
+        status_group = QGroupBox("連線狀態")
+        status_layout = QHBoxLayout(status_group)
+
+        self.db_status_label = QLabel("資料庫: 未連線")
+        self.opc_status_label = QLabel("OPC UA: 未連線")
+
+        status_layout.addWidget(self.db_status_label)
+        status_layout.addWidget(self.opc_status_label)
+        status_layout.addStretch()
+
+        self.btn_connect_opc = QPushButton("連線 OPC")
+        self.btn_connect_opc.clicked.connect(self.connect_opc)
+        status_layout.addWidget(self.btn_connect_opc)
+
+        layout.addWidget(status_group)
+
+        return panel
+
+    def create_menu_bar(self):
+        """建立選單列"""
+        menubar = self.menuBar()
+
+        # 檔案選單
+        file_menu = menubar.addMenu("檔案(&F)")
+
+        exit_action = QAction("結束(&X)", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # 工具選單
+        tools_menu = menubar.addMenu("工具(&T)")
+
+        db_settings_action = QAction("資料庫設定(&D)...", self)
+        db_settings_action.triggered.connect(self.show_db_settings)
+        tools_menu.addAction(db_settings_action)
+
+        opc_settings_action = QAction("OPC UA 設定(&O)...", self)
+        opc_settings_action.triggered.connect(self.show_opc_settings)
+        tools_menu.addAction(opc_settings_action)
+
+        tools_menu.addSeparator()
+
+        # 主題設定子選單
+        theme_menu = tools_menu.addMenu("主題設定(&M)")
+        self.theme_action_group = {}
+
+        theme_system_action = QAction("跟隨系統(&S)", self)
+        theme_system_action.setCheckable(True)
+        theme_system_action.setChecked(self.current_theme == "system")
+        theme_system_action.triggered.connect(lambda: self.set_theme("system"))
+        theme_menu.addAction(theme_system_action)
+        self.theme_action_group["system"] = theme_system_action
+
+        theme_light_action = QAction("亮色模式(&L)", self)
+        theme_light_action.setCheckable(True)
+        theme_light_action.setChecked(self.current_theme == "light")
+        theme_light_action.triggered.connect(lambda: self.set_theme("light"))
+        theme_menu.addAction(theme_light_action)
+        self.theme_action_group["light"] = theme_light_action
+
+        theme_dark_action = QAction("暗色模式(&D)", self)
+        theme_dark_action.setCheckable(True)
+        theme_dark_action.setChecked(self.current_theme == "dark")
+        theme_dark_action.triggered.connect(lambda: self.set_theme("dark"))
+        theme_menu.addAction(theme_dark_action)
+        self.theme_action_group["dark"] = theme_dark_action
+
+        # 確保只有一個選項被選中
+        theme_menu.triggered.connect(self._on_theme_menu_triggered)
+
+        # 說明選單
+        help_menu = menubar.addMenu("說明(&H)")
+
+        about_action = QAction("關於(&A)...", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def _on_theme_menu_triggered(self, action):
+        """處理主題選單點擊，確保只有一個選項被選中"""
+        for theme, act in self.theme_action_group.items():
+            if act != action:
+                act.setChecked(False)
+
+    def create_tool_bar(self):
+        """建立工具列"""
+        toolbar = QToolBar()
+        self.addToolBar(toolbar)
+
+        add_action = QAction("新增", self)
+        add_action.triggered.connect(self.add_schedule)
+        toolbar.addAction(add_action)
+
+        toolbar.addSeparator()
+
+        refresh_action = QAction("重新整理", self)
+        refresh_action.triggered.connect(self.load_schedules)
+        toolbar.addAction(refresh_action)
+
+    def setup_connections(self):
+        """設定信號連接"""
+        self.calendar.selectionChanged.connect(self.update_daily_summary)
+
+    def setup_system_tray(self):
+        """設定系統托盤"""
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+
+        tray_menu = QMenu()
+        show_action = QAction("顯示", self)
+        show_action.triggered.connect(self.show)
+        tray_menu.addAction(show_action)
+
+        tray_menu.addSeparator()
+
+        quit_action = QAction("結束", self)
+        quit_action.triggered.connect(self.close)
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_activated)
+
+    def on_tray_activated(self, reason):
+        """處理托盤圖示點擊"""
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+    def apply_modern_style(self):
+        """套用現代化樣式，根據主題模式選擇亮色或暗色主題"""
+        # 判斷是否使用暗色模式
+        is_dark = False
+        if self.current_theme == "dark":
+            is_dark = True
+        elif self.current_theme == "system":
+            is_dark = self.is_system_dark_mode()
+
+        if is_dark:
+            self._apply_dark_theme()
+        else:
+            self._apply_light_theme()
+
+    def _apply_light_theme(self):
+        """套用亮色主題"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f5f5f5;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #d0d0d0;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 12px;
+                background-color: white;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 8px;
+                color: #2c3e50;
+            }
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #106ebe;
+            }
+            QPushButton:pressed {
+                background-color: #005a9e;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+                color: #888888;
+            }
+            QTableWidget {
+                background-color: white;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                gridline-color: #e0e0e0;
+            }
+            QTableWidget::item:selected {
+                background-color: #0078d4;
+                color: white;
+            }
+            QHeaderView::section {
+                background-color: #f0f0f0;
+                padding: 8px;
+                border: none;
+                border-bottom: 2px solid #0078d4;
+                font-weight: bold;
+            }
+            QTextEdit {
+                background-color: white;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 8px;
+            }
+            QLabel {
+                color: #333;
+            }
+            QMenuBar {
+                background-color: #f0f0f0;
+                border-bottom: 1px solid #d0d0d0;
+            }
+            QMenuBar::item:selected {
+                background-color: #0078d4;
+                color: white;
+            }
+            QStatusBar {
+                background-color: #f0f0f0;
+                border-top: 1px solid #d0d0d0;
+            }
+        """)
+        # 更新日曆樣式
+        self._apply_calendar_light_theme()
+
+    def _apply_dark_theme(self):
+        """套用暗色主題"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #3d3d3d;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 12px;
+                background-color: #363636;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 8px;
+                color: #ffffff;
+            }
+            QPushButton {
+                background-color: #0e639c;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+            QPushButton:pressed {
+                background-color: #094771;
+            }
+            QPushButton:disabled {
+                background-color: #4a4a4a;
+                color: #808080;
+            }
+            QTableWidget {
+                background-color: #1e1e1e;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                gridline-color: #3d3d3d;
+                color: #cccccc;
+            }
+            QTableWidget::item:selected {
+                background-color: #094771;
+                color: white;
+            }
+            QHeaderView::section {
+                background-color: #252526;
+                padding: 8px;
+                border: none;
+                border-bottom: 2px solid #0e639c;
+                font-weight: bold;
+                color: #cccccc;
+            }
+            QTextEdit {
+                background-color: #1e1e1e;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 8px;
+                color: #cccccc;
+            }
+            QLabel {
+                color: #cccccc;
+            }
+            QMenuBar {
+                background-color: #2b2b2b;
+                border-bottom: 1px solid #3d3d3d;
+                color: #cccccc;
+            }
+            QMenuBar::item {
+                color: #cccccc;
+            }
+            QMenuBar::item:selected {
+                background-color: #094771;
+                color: white;
+            }
+            QMenu {
+                background-color: #2b2b2b;
+                border: 1px solid #3d3d3d;
+                color: #cccccc;
+            }
+            QMenu::item:selected {
+                background-color: #094771;
+                color: white;
+            }
+            QStatusBar {
+                background-color: #2b2b2b;
+                border-top: 1px solid #3d3d3d;
+                color: #cccccc;
+            }
+            QLineEdit {
+                background-color: #1e1e1e;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                color: #cccccc;
+            }
+            QLineEdit:focus {
+                border: 2px solid #0e639c;
+            }
+            QComboBox {
+                background-color: #1e1e1e;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                color: #cccccc;
+            }
+            QSpinBox {
+                background-color: #1e1e1e;
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                color: #cccccc;
+            }
+            QCalendarWidget {
+                background-color: #2b2b2b;
+            }
+            QCalendarWidget QTableView {
+                selection-background-color: #094771;
+                selection-color: white;
+                background-color: #1e1e1e;
+                color: #cccccc;
+            }
+            QCalendarWidget QWidget#qt_calendar_navigationbar {
+                background-color: #0e639c;
+            }
+            QCalendarWidget QToolButton {
+                color: white;
+                background-color: transparent;
+                border: none;
+                font-weight: bold;
+            }
+        """)
+        # 更新日曆樣式
+        self._apply_calendar_dark_theme()
+
+    def _apply_calendar_light_theme(self):
+        """套用日曆亮色主題"""
+        if hasattr(self, "calendar"):
+            self.calendar.setStyleSheet("""
+                QCalendarWidget {
+                    background-color: white;
+                }
+                QCalendarWidget QTableView {
+                    selection-background-color: #0078d4;
+                    selection-color: white;
+                }
+                QCalendarWidget QWidget#qt_calendar_navigationbar {
+                    background-color: #0078d4;
+                }
+                QCalendarWidget QToolButton {
+                    color: white;
+                    background-color: transparent;
+                    border: none;
+                    font-weight: bold;
+                }
+            """)
+
+    def _apply_calendar_dark_theme(self):
+        """套用日曆暗色主題"""
+        if hasattr(self, "calendar"):
+            self.calendar.setStyleSheet("""
+                QCalendarWidget {
+                    background-color: #2b2b2b;
+                }
+                QCalendarWidget QTableView {
+                    selection-background-color: #094771;
+                    selection-color: white;
+                    background-color: #1e1e1e;
+                    color: #cccccc;
+                }
+                QCalendarWidget QWidget#qt_calendar_navigationbar {
+                    background-color: #0e639c;
+                }
+                QCalendarWidget QToolButton {
+                    color: white;
+                    background-color: transparent;
+                    border: none;
+                    font-weight: bold;
+                }
+            """)
+
+    def setup_theme_listener(self):
+        """設定系統主題監聽"""
+        # 在 Windows 上監聽系統主題變化
+        try:
+            import winreg
+
+            self._theme_timer = QTimer(self)
+            self._theme_timer.timeout.connect(self.check_system_theme)
+            self._theme_timer.start(2000)  # 每2秒檢查一次
+            self._last_theme = self.is_system_dark_mode()
+        except ImportError:
+            pass
+
+    def is_system_dark_mode(self) -> bool:
+        """檢查系統是否使用暗色模式"""
+        try:
+            import winreg
+
+            registry = winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            key = winreg.OpenKey(registry, key_path)
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            return value == 0
+        except Exception:
+            return False
+
+    def check_system_theme(self):
+        """檢查系統主題是否變化"""
+        if self.current_theme == "system":
+            current_system_theme = self.is_system_dark_mode()
+            if current_system_theme != self._last_theme:
+                self._last_theme = current_system_theme
+                self.apply_modern_style()
+
+    def set_theme(self, theme: str):
+        """設定主題模式
+
+        Args:
+            theme: "light", "dark", 或 "system"
+        """
+        if theme in ["light", "dark", "system"]:
+            self.current_theme = theme
+            self.apply_modern_style()
+
+            # 更新選單狀態
+            if hasattr(self, "theme_action_group"):
+                self.theme_action_group[theme].setChecked(True)
+
+    def init_database(self):
+        """初始化資料庫連線"""
+        try:
+            # 初始化 SQLite 管理器（使用預設資料庫路徑）
+            self.db_manager = SQLiteManager()
+
+            # 建立資料表
+            if self.db_manager.init_db():
+                self.db_status_label.setText("資料庫: 已連線")
+                self.db_status_label.setStyleSheet("color: green;")
+                self.load_schedules()
+                self.start_scheduler()
+            else:
+                self.db_status_label.setText("資料庫: 資料表建立失敗")
+                self.db_status_label.setStyleSheet("color: red;")
+
+        except Exception as e:
+            self.db_status_label.setText(f"資料庫: 連線失敗")
+            self.db_status_label.setStyleSheet("color: red;")
+            self.db_manager = None
+            QMessageBox.warning(
+                self,
+                "資料庫連線失敗",
+                f"無法連線到資料庫:\n{str(e)}\n\n請檢查資料庫設定。",
+            )
+
+    def load_schedules(self):
+        """載入排程列表"""
+        if not self.db_manager:
+            return
+
+        self.schedules = self.db_manager.get_all_schedules()
+        self.update_schedule_table()
+        self.update_daily_summary()
+
+        self.status_bar.showMessage(f"已載入 {len(self.schedules)} 個排程")
+
+    def update_schedule_table(self):
+        """更新排程表格"""
+        self.schedule_table.setRowCount(len(self.schedules))
+
+        for row, schedule in enumerate(self.schedules):
+            self.schedule_table.setItem(
+                row, 0, QTableWidgetItem(str(schedule.get("id", "")))
+            )
+            self.schedule_table.setItem(
+                row, 1, QTableWidgetItem(schedule.get("task_name", ""))
+            )
+            self.schedule_table.setItem(
+                row, 2, QTableWidgetItem(schedule.get("opc_url", ""))
+            )
+            self.schedule_table.setItem(
+                row, 3, QTableWidgetItem(schedule.get("node_id", ""))
+            )
+            self.schedule_table.setItem(
+                row, 4, QTableWidgetItem(schedule.get("target_value", ""))
+            )
+            self.schedule_table.setItem(
+                row, 5, QTableWidgetItem(schedule.get("rrule_str", ""))
+            )
+
+            enabled = "✓" if schedule.get("is_enabled") else "✗"
+            item = QTableWidgetItem(enabled)
+            item.setTextAlignment(Qt.AlignCenter)
+            self.schedule_table.setItem(row, 6, item)
+
+    def update_daily_summary(self):
+        """更新當天排程摘要"""
+        selected_date = self.calendar.selectedDate().toPython()
+
+        # 取得當天的排程觸發時間
+        daily_schedules = []
+
+        for schedule in self.schedules:
+            if not schedule.get("is_enabled"):
+                continue
+
+            rrule_str = schedule.get("rrule_str", "")
+            if rrule_str:
+                # 取得當天的觸發時間
+                start = datetime.combine(selected_date, datetime.min.time())
+                end = datetime.combine(selected_date, datetime.max.time())
+
+                triggers = RRuleParser.get_trigger_between(rrule_str, start, end)
+
+                for trigger in triggers:
+                    daily_schedules.append(
+                        {
+                            "time": trigger.strftime("%H:%M"),
+                            "name": schedule.get("task_name", ""),
+                            "value": schedule.get("target_value", ""),
+                        }
+                    )
+
+        # 排序並顯示
+        daily_schedules.sort(key=lambda x: x["time"])
+
+        if daily_schedules:
+            summary_text = f"<b>{selected_date.strftime('%Y/%m/%d')} 排程:</b><br>"
+            for item in daily_schedules:
+                summary_text += (
+                    f"<br>🕐 {item['time']} - {item['name']} ({item['value']})"
+                )
+        else:
+            summary_text = (
+                f"<b>{selected_date.strftime('%Y/%m/%d')}</b><br><br>當天沒有排程任務"
+            )
+
+        self.daily_summary.setHtml(summary_text)
+
+    def add_schedule(self):
+        """新增排程"""
+        dialog = ScheduleEditDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.get_data()
+
+            if self.db_manager:
+                schedule_id = self.db_manager.create_schedule(
+                    task_name=data["task_name"],
+                    opc_url=data["opc_url"],
+                    node_id=data["node_id"],
+                    target_value=data["target_value"],
+                    rrule_str=data["rrule_str"],
+                    is_enabled=1,
+                )
+
+                if schedule_id:
+                    QMessageBox.information(self, "成功", "排程已新增")
+                    self.load_schedules()
+                else:
+                    QMessageBox.critical(self, "錯誤", "新增排程失敗")
+
+    def edit_schedule(self):
+        """編輯排程"""
+        current_row = self.schedule_table.currentRow()
+        if current_row < 0 or current_row >= len(self.schedules):
+            return
+
+        schedule = self.schedules[current_row]
+
+        dialog = ScheduleEditDialog(self, schedule)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.get_data()
+
+            if self.db_manager:
+                success = self.db_manager.update_schedule(
+                    schedule_id=schedule["id"],
+                    task_name=data["task_name"],
+                    opc_url=data["opc_url"],
+                    node_id=data["node_id"],
+                    target_value=data["target_value"],
+                    rrule_str=data["rrule_str"],
+                )
+
+                if success:
+                    QMessageBox.information(self, "成功", "排程已更新")
+                    self.load_schedules()
+                else:
+                    QMessageBox.critical(self, "錯誤", "更新排程失敗")
+
+    def delete_schedule(self):
+        """刪除排程"""
+        current_row = self.schedule_table.currentRow()
+        if current_row < 0 or current_row >= len(self.schedules):
+            return
+
+        schedule = self.schedules[current_row]
+
+        reply = QMessageBox.question(
+            self,
+            "確認刪除",
+            f"確定要刪除排程 '{schedule.get('task_name')}' 嗎？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply == QMessageBox.Yes:
+            if self.db_manager:
+                success = self.db_manager.delete_schedule(schedule["id"])
+
+                if success:
+                    QMessageBox.information(self, "成功", "排程已刪除")
+                    self.load_schedules()
+                else:
+                    QMessageBox.critical(self, "錯誤", "刪除排程失敗")
+
+    def on_selection_changed(self):
+        """處理表格選擇變更"""
+        has_selection = self.schedule_table.currentRow() >= 0
+        self.btn_edit.setEnabled(has_selection)
+        self.btn_delete.setEnabled(has_selection)
+
+    def show_table_context_menu(self, position):
+        """顯示表格右鍵選單"""
+        menu = QMenu()
+
+        edit_action = menu.addAction("編輯")
+        edit_action.triggered.connect(self.edit_schedule)
+
+        delete_action = menu.addAction("刪除")
+        delete_action.triggered.connect(self.delete_schedule)
+
+        menu.addSeparator()
+
+        toggle_action = menu.addAction("啟用/停用")
+        toggle_action.triggered.connect(self.toggle_schedule_enabled)
+
+        menu.exec(self.schedule_table.viewport().mapToGlobal(position))
+
+    def toggle_schedule_enabled(self):
+        """切換排程啟用狀態"""
+        current_row = self.schedule_table.currentRow()
+        if current_row < 0 or current_row >= len(self.schedules):
+            return
+
+        schedule = self.schedules[current_row]
+        new_status = 0 if schedule.get("is_enabled") else 1
+
+        if self.db_manager:
+            self.db_manager.toggle_schedule(schedule["id"], new_status)
+            self.load_schedules()
+
+    def start_scheduler(self):
+        """啟動排程背景工作"""
+        if self.db_manager:
+            self.scheduler_worker = SchedulerWorker(self.db_manager)
+            self.scheduler_worker.trigger_task.connect(self.on_task_triggered)
+            self.scheduler_worker.start()
+            self.status_bar.showMessage("排程器已啟動")
+
+    @Slot(dict)
+    def on_task_triggered(self, schedule: Dict[str, Any]):
+        """處理排程觸發"""
+        self.status_bar.showMessage(f"執行排程: {schedule.get('task_name', '')}")
+
+        # 執行 OPC UA 寫入
+        asyncio.create_task(self.execute_task(schedule))
+
+    async def execute_task(self, schedule: Dict[str, Any]):
+        """執行排程任務"""
+        opc_url = schedule.get("opc_url", "")
+        node_id = schedule.get("node_id", "")
+        target_value = schedule.get("target_value", "")
+
+        try:
+            async with OPCHandler(opc_url) as handler:
+                if handler.is_connected:
+                    success = await handler.write_node(node_id, target_value)
+                    if success:
+                        self.status_bar.showMessage(
+                            f"✓ 已寫入 {node_id} = {target_value}", 5000
+                        )
+                    else:
+                        self.status_bar.showMessage(f"✗ 寫入失敗: {node_id}", 5000)
+                else:
+                    self.status_bar.showMessage(f"✗ 無法連線 OPC UA: {opc_url}", 5000)
+        except Exception as e:
+            self.status_bar.showMessage(f"✗ 執行錯誤: {str(e)}", 5000)
+
+    async def connect_opc(self):
+        """連線到 OPC UA 伺服器"""
+        # 這裡應該從設定或使用者輸入取得 URL
+        opc_url = "opc.tcp://localhost:4840"
+
+        self.opc_handler = OPCHandler(opc_url)
+
+        try:
+            success = await self.opc_handler.connect()
+            if success:
+                self.opc_status_label.setText(f"OPC UA: 已連線 ({opc_url})")
+                self.opc_status_label.setStyleSheet("color: green;")
+            else:
+                self.opc_status_label.setText("OPC UA: 連線失敗")
+                self.opc_status_label.setStyleSheet("color: red;")
+        except Exception as e:
+            self.opc_status_label.setText("OPC UA: 連線錯誤")
+            self.opc_status_label.setStyleSheet("color: red;")
+            QMessageBox.critical(self, "OPC 連線錯誤", str(e))
+
+    def show_db_settings(self):
+        """顯示資料庫設定對話框"""
+        QMessageBox.information(self, "資料庫設定", "資料庫設定功能開發中...")
+
+    def show_opc_settings(self):
+        """顯示 OPC UA 設定對話框"""
+        QMessageBox.information(self, "OPC UA 設定", "OPC UA 設定功能開發中...")
+
+    def show_about(self):
+        """顯示關於對話框"""
+        QMessageBox.about(
+            self,
+            "關於 CalendarUA",
+            """<h2>CalendarUA v1.0</h2>
+            <p>工業自動化排程管理系統</p>
+            <p>採用 Python 3.12 + PySide6 開發</p>
+            <p>結合 OPC UA 與 MySQL 技術</p>
+            """,
+        )
+
+    def closeEvent(self, event):
+        """處理視窗關閉事件"""
+        if self.scheduler_worker:
+            self.scheduler_worker.stop()
+
+        if self.opc_handler:
+            asyncio.create_task(self.opc_handler.disconnect())
+
+        event.accept()
+
+
+class OPCNodeBrowserDialog(QDialog):
+    """OPC UA 節點瀏覽對話框"""
+
+    def __init__(self, parent=None, opc_url: str = ""):
+        super().__init__(parent)
+        self.opc_url = opc_url
+        self.selected_node = ""
+        self.opc_handler = None
+        self.setup_ui()
+        self.apply_style()
+        # 自動連線並載入節點
+        QTimer.singleShot(100, self.connect_and_load)
+
+    def setup_ui(self):
+        """設定介面"""
+        self.setWindowTitle("瀏覽 OPC UA 節點")
+        self.setMinimumSize(500, 400)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 顯示目前連線資訊
+        info_layout = QHBoxLayout()
+        info_layout.addWidget(QLabel("OPC URL:"))
+        self.url_label = QLabel(self.opc_url)
+        self.url_label.setStyleSheet("font-weight: bold;")
+        info_layout.addWidget(self.url_label)
+        info_layout.addStretch()
+        layout.addLayout(info_layout)
+
+        # 狀態標籤
+        self.status_label = QLabel("正在連線...")
+        self.status_label.setStyleSheet("color: #666;")
+        layout.addWidget(self.status_label)
+
+        # 節點樹狀列表
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setHeaderLabels(["節點名稱", "Node ID", "節點類型"])
+        self.tree_widget.setColumnWidth(0, 200)
+        self.tree_widget.setColumnWidth(1, 150)
+        self.tree_widget.itemSelectionChanged.connect(self.on_selection_changed)
+        self.tree_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        layout.addWidget(self.tree_widget)
+
+        # 按鈕
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        refresh_btn = QPushButton("重新整理")
+        refresh_btn.clicked.connect(self.connect_and_load)
+        button_layout.addWidget(refresh_btn)
+
+        button_layout.addSpacing(20)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+
+        self.select_btn = QPushButton("選擇")
+        self.select_btn.setDefault(True)
+        self.select_btn.setEnabled(False)
+        self.select_btn.clicked.connect(self.accept)
+        button_layout.addWidget(self.select_btn)
+
+        layout.addLayout(button_layout)
+
+    def apply_style(self):
+        """套用樣式"""
+        parent = self.parent()
+        is_dark = False
+        if parent and hasattr(parent, "parent"):
+            grandparent = parent.parent()
+            if grandparent and hasattr(grandparent, "current_theme"):
+                if grandparent.current_theme == "dark":
+                    is_dark = True
+                elif grandparent.current_theme == "system":
+                    if hasattr(grandparent, "is_system_dark_mode"):
+                        is_dark = grandparent.is_system_dark_mode()
+
+        if is_dark:
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #2b2b2b;
+                }
+                QLabel {
+                    color: #cccccc;
+                }
+                QTreeWidget {
+                    background-color: #1e1e1e;
+                    border: 1px solid #3d3d3d;
+                    color: #cccccc;
+                }
+                QTreeWidget::item:selected {
+                    background-color: #094771;
+                    color: white;
+                }
+                QTreeWidget::item:hover {
+                    background-color: #2d2d2d;
+                }
+                QHeaderView::section {
+                    background-color: #252526;
+                    padding: 6px;
+                    border: none;
+                    border-bottom: 2px solid #0e639c;
+                    font-weight: bold;
+                    color: #cccccc;
+                }
+                QPushButton {
+                    background-color: #0e639c;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #1177bb;
+                }
+                QPushButton:disabled {
+                    background-color: #4a4a4a;
+                    color: #808080;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #f5f5f5;
+                }
+                QLabel {
+                    color: #333;
+                }
+                QTreeWidget {
+                    background-color: white;
+                    border: 1px solid #d0d0d0;
+                    color: #333;
+                }
+                QTreeWidget::item:selected {
+                    background-color: #0078d4;
+                    color: white;
+                }
+                QTreeWidget::item:hover {
+                    background-color: #e5f3ff;
+                }
+                QHeaderView::section {
+                    background-color: #f0f0f0;
+                    padding: 6px;
+                    border: none;
+                    border-bottom: 2px solid #0078d4;
+                    font-weight: bold;
+                }
+                QPushButton {
+                    background-color: #0078d4;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 8px 16px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #106ebe;
+                }
+                QPushButton:disabled {
+                    background-color: #cccccc;
+                    color: #888888;
+                }
+            """)
+
+    def connect_and_load(self):
+        """連線到 OPC UA 並載入節點 - 使用 qasync 整合"""
+        self.tree_widget.clear()
+        self.status_label.setText("正在連線...")
+        self.status_label.setStyleSheet("color: #666;")
+
+        # 使用 QTimer 稍後執行異步操作，避免阻塞 UI
+        QTimer.singleShot(100, self._async_connect_and_load)
+
+    def _async_connect_and_load(self):
+        """異步連線和載入"""
+        import asyncio
+
+        async def do_connect():
+            try:
+                from core.opc_handler import OPCHandler
+
+                self.opc_handler = OPCHandler(self.opc_url)
+
+                # 連線到 OPC UA 伺服器
+                success = await self.opc_handler.connect()
+
+                if success:
+                    self.status_label.setText("已連線，正在載入節點...")
+                    self.status_label.setStyleSheet("color: green;")
+
+                    # 載入節點
+                    await self._async_load_nodes()
+
+                    # 斷開連線
+                    await self.opc_handler.disconnect()
+                else:
+                    self.status_label.setText("連線失敗 - 請檢查 URL 和伺服器狀態")
+                    self.status_label.setStyleSheet("color: red;")
+
+            except Exception as e:
+                self.status_label.setText(f"連線錯誤: {str(e)}")
+                self.status_label.setStyleSheet("color: red;")
+
+        # 使用現有的 qasync 事件迴圈執行
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 如果迴圈已在執行，建立 task
+                asyncio.create_task(do_connect())
+            else:
+                loop.run_until_complete(do_connect())
+        except RuntimeError:
+            # 沒有事件迴圈的情況
+            asyncio.run(do_connect())
+
+    async def _async_load_nodes(self):
+        """異步載入 OPC UA 節點樹"""
+        try:
+            # 取得 Objects 節點
+            objects = await self.opc_handler.get_objects_node()
+
+            if objects:
+                root_item = QTreeWidgetItem(self.tree_widget)
+                root_item.setText(0, "Objects")
+                root_item.setText(1, "i=85")
+                root_item.setText(2, "Object")
+                root_item.setExpanded(True)
+
+                # 載入子節點
+                await self._async_load_child_nodes(objects, root_item, depth=0)
+
+            self.status_label.setText("已載入節點")
+
+        except Exception as e:
+            self.status_label.setText(f"載入節點錯誤: {str(e)}")
+            self.status_label.setStyleSheet("color: red;")
+
+    async def _async_load_child_nodes(self, parent_node, parent_item, depth=0):
+        """異步遞迴載入子節點"""
+        if depth > 2:  # 限制深度避免載入太多
+            return
+
+        try:
+            # 取得子節點
+            children = await parent_node.get_children()
+
+            for child in children:
+                try:
+                    child_item = QTreeWidgetItem(parent_item)
+
+                    # 取得節點資訊
+                    browse_name = await child.read_browse_name()
+                    node_id = str(child.nodeid)
+                    node_class = await child.read_node_class()
+
+                    child_item.setText(0, browse_name.Name)
+                    child_item.setText(1, node_id)
+                    child_item.setText(2, str(node_class))
+
+                    # 儲存節點 ID
+                    child_item.setData(0, Qt.ItemDataRole.UserRole, node_id)
+
+                    # 繼續載入子節點
+                    await self._async_load_child_nodes(child, child_item, depth + 1)
+
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+
+        except Exception:
+            pass
+
+    def on_selection_changed(self):
+        """處理選擇變更"""
+        selected_items = self.tree_widget.selectedItems()
+        if selected_items:
+            self.selected_node = selected_items[0].text(1)
+            self.select_btn.setEnabled(True)
+        else:
+            self.selected_node = ""
+            self.select_btn.setEnabled(False)
+
+    def on_item_double_clicked(self, item, column):
+        """處理雙擊事件"""
+        self.selected_node = item.text(1)
+        self.accept()
+
+    def get_selected_node(self) -> str:
+        """取得選擇的節點 ID"""
+        return self.selected_node
+
+
+class ScheduleEditDialog(QDialog):
+    """排程編輯對話框"""
+
+    def __init__(self, parent=None, schedule: Dict[str, Any] = None):
+        super().__init__(parent)
+        self.schedule = schedule
+        self.setup_ui()
+        self.apply_style()
+
+        if schedule:
+            self.load_data()
+
+    def setup_ui(self):
+        self.setWindowTitle("編輯排程" if self.schedule else "新增排程")
+        self.setMinimumWidth(500)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 基本資訊
+        basic_group = QGroupBox("基本資訊")
+        basic_layout = QGridLayout(basic_group)
+
+        basic_layout.addWidget(QLabel("任務名稱:"), 0, 0)
+        self.task_name_edit = QLineEdit()
+        self.task_name_edit.setPlaceholderText("例如：每日早班開機")
+        basic_layout.addWidget(self.task_name_edit, 0, 1)
+
+        basic_layout.addWidget(QLabel("OPC URL:"), 1, 0)
+        opc_url_layout = QHBoxLayout()
+        opc_url_layout.setSpacing(5)
+        self.opc_url_edit = QLineEdit()
+        self.opc_url_edit.setPlaceholderText("localhost:4840")
+        opc_url_layout.addWidget(self.opc_url_edit)
+        # 添加協議標籤顯示
+        self.opc_protocol_label = QLabel("opc.tcp://")
+        self.opc_protocol_label.setStyleSheet("color: #666; padding-right: 5px;")
+        opc_url_layout.insertWidget(0, self.opc_protocol_label)
+        basic_layout.addLayout(opc_url_layout, 1, 1)
+
+        basic_layout.addWidget(QLabel("Node ID:"), 2, 0)
+        node_id_layout = QHBoxLayout()
+        node_id_layout.setSpacing(5)
+        self.node_id_edit = QLineEdit()
+        self.node_id_edit.setPlaceholderText("ns=2;i=1001")
+        node_id_layout.addWidget(self.node_id_edit)
+        # 添加瀏覽按鈕
+        self.btn_browse_node = QPushButton("瀏覽...")
+        self.btn_browse_node.setToolTip("瀏覽 OPC UA 節點")
+        self.btn_browse_node.clicked.connect(self.browse_opcua_nodes)
+        self.btn_browse_node.setMaximumWidth(80)
+        node_id_layout.addWidget(self.btn_browse_node)
+        basic_layout.addLayout(node_id_layout, 2, 1)
+
+        basic_layout.addWidget(QLabel("目標值:"), 3, 0)
+        self.target_value_edit = QLineEdit()
+        self.target_value_edit.setPlaceholderText("1")
+        basic_layout.addWidget(self.target_value_edit, 3, 1)
+
+        layout.addWidget(basic_group)
+
+        # 週期設定
+        recurrence_group = QGroupBox("週期設定")
+        recurrence_layout = QVBoxLayout(recurrence_group)
+
+        self.rrule_display = QLineEdit()
+        self.rrule_display.setReadOnly(True)
+        self.rrule_display.setPlaceholderText("點擊下方按鈕設定週期規則")
+        recurrence_layout.addWidget(self.rrule_display)
+
+        self.btn_edit_recurrence = QPushButton("設定週期規則...")
+        self.btn_edit_recurrence.clicked.connect(self.edit_recurrence)
+        recurrence_layout.addWidget(self.btn_edit_recurrence)
+
+        layout.addWidget(recurrence_group)
+
+        # 按鈕
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("確定")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.accept)
+        button_layout.addWidget(ok_btn)
+
+        layout.addLayout(button_layout)
+
+    def apply_style(self):
+        """套用樣式，根據父視窗主題選擇亮色或暗色"""
+        # 判斷是否使用暗色模式
+        is_dark = False
+        parent = self.parent()
+        if parent and hasattr(parent, "current_theme"):
+            if parent.current_theme == "dark":
+                is_dark = True
+            elif parent.current_theme == "system":
+                if hasattr(parent, "is_system_dark_mode"):
+                    is_dark = parent.is_system_dark_mode()
+
+        if is_dark:
+            self._apply_dark_style()
+        else:
+            self._apply_light_style()
+
+    def _apply_light_style(self):
+        """套用亮色樣式"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f5f5f5;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #d0d0d0;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 12px;
+                background-color: white;
+            }
+            QGroupBox::title {
+                color: #2c3e50;
+            }
+            QLabel {
+                color: #333;
+            }
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #106ebe;
+            }
+            QLineEdit {
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: white;
+                color: #333;
+            }
+            QLineEdit:focus {
+                border: 2px solid #0078d4;
+            }
+        """)
+
+    def _apply_dark_style(self):
+        """套用暗色樣式"""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #3d3d3d;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding-top: 12px;
+                background-color: #363636;
+            }
+            QGroupBox::title {
+                color: #ffffff;
+            }
+            QLabel {
+                color: #cccccc;
+            }
+            QPushButton {
+                background-color: #0e639c;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+            QLineEdit {
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: #1e1e1e;
+                color: #cccccc;
+            }
+            QLineEdit:focus {
+                border: 2px solid #0e639c;
+            }
+        """)
+
+    def load_data(self):
+        """載入現有資料"""
+        self.task_name_edit.setText(self.schedule.get("task_name", ""))
+        # 提取 ip:port 部分（去掉 opc.tcp:// 前綴）
+        opc_url = self.schedule.get("opc_url", "")
+        if opc_url.startswith("opc.tcp://"):
+            opc_url = opc_url[10:]  # 去掉 "opc.tcp://"
+        self.opc_url_edit.setText(opc_url)
+        self.node_id_edit.setText(self.schedule.get("node_id", ""))
+        self.target_value_edit.setText(self.schedule.get("target_value", ""))
+        self.rrule_display.setText(self.schedule.get("rrule_str", ""))
+
+    def edit_recurrence(self):
+        """編輯週期規則"""
+        current_rrule = self.rrule_display.text()
+        rrule = show_recurrence_dialog(self, current_rrule)
+        if rrule:
+            self.rrule_display.setText(rrule)
+
+    def get_data(self) -> Dict[str, str]:
+        """取得編輯的資料"""
+        # 自動添加 opc.tcp:// 前綴
+        opc_url = self.opc_url_edit.text().strip()
+        if opc_url and not opc_url.startswith("opc.tcp://"):
+            opc_url = f"opc.tcp://{opc_url}"
+
+        return {
+            "task_name": self.task_name_edit.text(),
+            "opc_url": opc_url,
+            "node_id": self.node_id_edit.text(),
+            "target_value": self.target_value_edit.text(),
+            "rrule_str": self.rrule_display.text(),
+        }
+
+    def browse_opcua_nodes(self):
+        """瀏覽 OPC UA 節點"""
+        # 取得目前的 OPC URL
+        opc_url = self.opc_url_edit.text().strip()
+        if opc_url and not opc_url.startswith("opc.tcp://"):
+            opc_url = f"opc.tcp://{opc_url}"
+
+        if not opc_url:
+            QMessageBox.warning(
+                self,
+                "警告",
+                "請先輸入 OPC URL (IP:Port)",
+            )
+            return
+
+        # 開啟節點瀏覽對話框
+        dialog = OPCNodeBrowserDialog(self, opc_url)
+        if dialog.exec() == QDialog.Accepted:
+            selected_node = dialog.get_selected_node()
+            if selected_node:
+                self.node_id_edit.setText(selected_node)
+
+
+async def main():
+    """主程式進入點"""
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+
+    # 設定應用程式資訊
+    app.setApplicationName("CalendarUA")
+    app.setApplicationVersion("1.0.0")
+
+    # 建立事件迴圈
+    loop = qasync.QEventLoop(app)
+    asyncio.set_event_loop(loop)
+
+    # 建立主視窗
+    window = CalendarUA()
+    window.show()
+
+    # 執行事件迴圈
+    with loop:
+        loop.run_forever()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -11,7 +11,7 @@ UI 框架: PySide6 (Qt for Python) - 打造現代化 Office/Windows 11 視覺風
 
 通訊協定: asyncua (非同步 OPC UA 用戶端)。
 
-資料庫: MySQL 8.0+ (儲存排程規則、Tag 配置及執行日誌)。
+**資料庫**: SQLite (內建於 Python，無需額外安裝伺服器，資料儲存在 `./database/calendarua.db`)
 
 3. 專案目錄架構
 CalendarUA/
@@ -26,18 +26,19 @@ CalendarUA/
 │   ├── opc_handler.py     # OPC UA 讀寫邏輯與例外處理
 │   └── rrule_parser.py    # 邏輯轉換：將 UI 設定轉為 RRULE 字串
 └── database/
-    └── mysql_manager.py   # MySQL 資料庫 CRUD 操作與連線池管理
+    └── sqlite_manager.py   # SQLite 資料庫 CRUD 操作
 
-4. 資料庫設計 (MySQL Schema)
+## 4. 資料庫設計 (SQLite Schema)
 表格名稱：schedules
-欄位名稱,型態,說明
-id,"INT (PK, AI)",唯一識別碼
-task_name,VARCHAR(100),任務名稱 (例如：每日早班開機)
-opc_url,VARCHAR(255),OPC UA 伺服器位址
-node_id,VARCHAR(255),OPC UA Tag NodeID
-target_value,VARCHAR(50),要寫入的數值
-rrule_str,VARCHAR(500),"RRULE 規則字串 (例如：FREQ=WEEKLY;BYDAY=TU,TH)"
-is_enabled,TINYINT(1),"是否啟用該排程 (1: 啟用, 0: 停用)"
+欄位名稱 | 型態 | 說明
+--- | --- | ---
+id | INTEGER PRIMARY KEY AUTOINCREMENT | 唯一識別碼
+task_name | TEXT | 任務名稱
+opc_url | TEXT | OPC UA 伺服器位址
+node_id | TEXT | OPC UA Tag NodeID
+target_value | TEXT | 要寫入的數值
+rrule_str | TEXT | RRULE 規則字串
+is_enabled | INTEGER | 是否啟用 (1: 啟用, 0: 停用)
 
 5. 開發指令建議 (Copilot Prompts)
 在 VS Code 中開發時，建議使用以下指令引導 Copilot：
