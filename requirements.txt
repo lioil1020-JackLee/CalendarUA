@@ -1,0 +1,5 @@
+PySide6>=6.6.0
+asyncua>=1.0.0
+python-dateutil>=2.8.2
+mysql-connector-python>=8.0.0
+qasync>=0.27.0
