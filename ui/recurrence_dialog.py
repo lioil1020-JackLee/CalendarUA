@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QGridLayout,
     QFrame,
+    QMessageBox,
 )
 from PySide6.QtCore import Qt, QDate, QTime, Signal
 from PySide6.QtGui import QFont
@@ -75,21 +76,23 @@ class RecurrenceDialog(QDialog):
         start_label = QLabel("開始(T):")
         start_label.setObjectName("fieldLabel")
         layout.addWidget(start_label, 0, 0)
-        self.start_time_edit = QTimeEdit()
-        self.start_time_edit.setDisplayFormat("hh:mm")
-        self.start_time_edit.setTime(QTime(9, 0))
-        self.start_time_edit.setFixedWidth(80)
-        layout.addWidget(self.start_time_edit, 0, 1)
+        self.start_time_combo = QComboBox()
+        self.start_time_combo.setEditable(True)
+        self.start_time_combo.setObjectName("startTimeCombo")
+        self.populate_time_combo(self.start_time_combo)
+        self.start_time_combo.setFixedWidth(120)
+        layout.addWidget(self.start_time_combo, 0, 1)
 
         # 結束時間
         end_label = QLabel("結束(N):")
         end_label.setObjectName("fieldLabel")
         layout.addWidget(end_label, 1, 0)
-        self.end_time_edit = QTimeEdit()
-        self.end_time_edit.setDisplayFormat("hh:mm")
-        self.end_time_edit.setTime(QTime(9, 30))
-        self.end_time_edit.setFixedWidth(80)
-        layout.addWidget(self.end_time_edit, 1, 1)
+        self.end_time_combo = QComboBox()
+        self.end_time_combo.setEditable(True)
+        self.end_time_combo.setObjectName("endTimeCombo")
+        self.populate_time_combo(self.end_time_combo)
+        self.end_time_combo.setFixedWidth(120)
+        layout.addWidget(self.end_time_combo, 1, 1)
 
         # 期間
         duration_label = QLabel("期間(U):")
@@ -108,22 +111,183 @@ class RecurrenceDialog(QDialog):
         self.duration_combo.clear()
         durations = [
             ("0 分", 0),
+            ("5 分", 5),
+            ("10 分", 10),
             ("15 分", 15),
             ("30 分", 30),
-            ("45 分", 45),
-            ("1 小時", 60),
-            ("1.5 小時", 90),
-            ("2 小時", 120),
-            ("3 小時", 180),
-            ("4 小時", 240),
-            ("5 小時", 300),
-            ("6 小時", 360),
-            ("7 小時", 420),
-            ("8 小時", 480),
+            ("1 時", 60),
+            ("2 時", 120),
+            ("3 時", 180),
+            ("4 時", 240),
+            ("5 時", 300),
+            ("6 時", 360),
+            ("7 時", 420),
+            ("8 時", 480),
+            ("9 時", 540),
+            ("10 時", 600),
+            ("11 時", 660),
+            ("0.5 日", 720),
+            ("18 時", 1080),
+            ("1 日", 1440),
+            ("2 日", 2880),
+            ("3 日", 4320),
+            ("4 日", 5760),
+            ("1 週", 10080),
+            ("2 週", 20160),
         ]
         for text, minutes in durations:
             self.duration_combo.addItem(text, minutes)
-        self.duration_combo.setCurrentIndex(2)  # 預設 30 分
+        self.duration_combo.setCurrentIndex(4)  # 預設 30 分
+
+    def populate_time_combo(self, combo: QComboBox):
+        """填充時間下拉選單"""
+        combo.clear()
+        # 生成從上午 12:00 (00:00) 到下午 11:30 (23:30) 的選項，每 30 分鐘一個
+        for hour in range(24):
+            for minute in [0, 30]:
+                time_str = "上午" if hour < 12 else "下午"
+                display_hour = hour % 12
+                if display_hour == 0:
+                    display_hour = 12
+                time_text = f"{time_str} {display_hour:02d}:{minute:02d}"
+                combo.addItem(time_text, QTime(hour, minute))
+
+        # 設置預設值為離目前系統時間最接近的，但要大於目前系統時間
+        current_time = QTime.currentTime()
+        best_i = -1
+        best_time = None
+        for i in range(combo.count()):
+            time = combo.itemData(i)
+            if time > current_time and (best_time is None or time < best_time):
+                best_time = time
+                best_i = i
+        if best_i >= 0:
+            combo.setCurrentIndex(best_i)
+
+    def connect_signals(self):
+        """連接信號"""
+        # 連接時間和期間的互動
+        self.start_time_combo.activated.connect(self.on_start_time_changed)
+        self.start_time_combo.editTextChanged.connect(self.on_start_time_changed)
+        self.end_time_combo.activated.connect(self.on_end_time_changed)
+        self.end_time_combo.editTextChanged.connect(self.on_end_time_changed)
+        self.duration_combo.currentIndexChanged.connect(self.on_duration_changed)
+
+        # 頻率選擇變更
+        self.radio_daily.toggled.connect(self.on_frequency_changed)
+        self.radio_weekly.toggled.connect(self.on_frequency_changed)
+        self.radio_monthly.toggled.connect(self.on_frequency_changed)
+        self.radio_yearly.toggled.connect(self.on_frequency_changed)
+
+    def on_start_time_changed(self, value):
+        """開始時間改變時更新結束時間"""
+        if not hasattr(self, "_updating_times") or not self._updating_times:
+            self._updating_times = True
+            try:
+                start_time = self.get_time_from_combo(self.start_time_combo)
+                duration_minutes = self.duration_combo.currentData()
+                if start_time and duration_minutes is not None:
+                    end_time = start_time.addSecs(duration_minutes * 60)
+                    self.set_combo_to_time(self.end_time_combo, end_time)
+            finally:
+                self._updating_times = False
+
+    def on_end_time_changed(self, value):
+        """結束時間改變時更新期間"""
+        if not hasattr(self, "_updating_times") or not self._updating_times:
+            self._updating_times = True
+            try:
+                start_time = self.get_time_from_combo(self.start_time_combo)
+                end_time = self.get_time_from_combo(self.end_time_combo)
+                if start_time and end_time:
+                    duration_seconds = start_time.secsTo(end_time)
+                    if duration_seconds < 0:
+                        duration_seconds += 24 * 3600  # 跨日
+                    duration_minutes = duration_seconds // 60
+                    self.set_duration_to_minutes(duration_minutes)
+            finally:
+                self._updating_times = False
+
+    def get_time_from_combo(self, combo: QComboBox) -> QTime:
+        """從 ComboBox 獲取時間"""
+        text = combo.currentText()
+        if ":" in text:
+            # 自訂時間格式 或 標準格式
+            parts = text.split()
+            if len(parts) >= 2 and (parts[0] == "上午" or parts[0] == "下午"):
+                # 標準格式: "上午 12:00"
+                period = parts[0]
+                time_part = parts[-1]
+                hour, minute = map(int, time_part.split(":"))
+                if period == "上午":
+                    if hour == 12:
+                        hour = 0
+                elif period == "下午":
+                    if hour != 12:
+                        hour += 12
+                return QTime(hour, minute)
+            else:
+                # 自訂格式: "12:00"
+                time_part = text.split()[-1]
+                try:
+                    hour, minute = map(int, time_part.split(":"))
+                    return QTime(hour, minute)
+                except:
+                    pass
+        # 從項目數據獲取
+        return combo.currentData()
+
+    def set_combo_to_time(self, combo: QComboBox, time: QTime):
+        """設置 ComboBox 到指定時間"""
+        combo.blockSignals(True)
+        try:
+            # 首先嘗試找到匹配的項目
+            for i in range(combo.count()):
+                item_time = combo.itemData(i)
+                if item_time == time:
+                    combo.setCurrentIndex(i)
+                    return
+            # 如果沒有找到，設置為自訂文本
+            time_str = time.toString("hh:mm")
+            combo.setCurrentText(time_str)
+        finally:
+            combo.blockSignals(False)
+
+    def set_duration_to_minutes(self, minutes: int):
+        """設置期間到最接近的分鐘數"""
+        self.duration_combo.blockSignals(True)
+        try:
+            best_index = 0
+            min_diff = abs(self.duration_combo.itemData(0) - minutes)
+
+            for i in range(1, self.duration_combo.count()):
+                diff = abs(self.duration_combo.itemData(i) - minutes)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_index = i
+
+            self.duration_combo.setCurrentIndex(best_index)
+        finally:
+            self.duration_combo.blockSignals(False)
+
+    def is_valid_time_text(self, text: str) -> bool:
+        """檢查文字是否是有效的時間格式"""
+        if not text:
+            return False
+        # 檢查是否包含 ":" 且長度適中
+        if ":" not in text or len(text) < 4:
+            return False
+        # 處理 "上午 hh:mm" 或 "下午 hh:mm" 格式
+        time_part = text.split()[-1]  # 取最後部分，如 "10:00"
+        try:
+            parts = time_part.split(":")
+            if len(parts) == 2:
+                hour = int(parts[0])
+                minute = int(parts[1])
+                return 0 <= hour <= 23 and 0 <= minute <= 59
+        except ValueError:
+            pass
+        return False
 
     def create_recurrence_pattern_group(self) -> QGroupBox:
         """建立循環模式區塊"""
@@ -532,22 +696,6 @@ class RecurrenceDialog(QDialog):
 
         return widget
 
-    def connect_signals(self):
-        """連接信號"""
-        # 頻率選擇變更
-        self.radio_daily.toggled.connect(self.on_frequency_changed)
-        self.radio_weekly.toggled.connect(self.on_frequency_changed)
-        self.radio_monthly.toggled.connect(self.on_frequency_changed)
-        self.radio_yearly.toggled.connect(self.on_frequency_changed)
-
-        # 時間變更時自動計算
-        self.start_time_edit.timeChanged.connect(self.on_start_time_changed)
-        self.end_time_edit.timeChanged.connect(self.on_end_time_changed)
-        self.duration_combo.currentIndexChanged.connect(self.on_duration_changed)
-
-        # 初始化時更新期間顯示
-        self.update_duration_from_times()
-
     def on_frequency_changed(self):
         """頻率選擇變更時顯示對應的詳細設定"""
         self.daily_widget.setVisible(self.radio_daily.isChecked())
@@ -555,68 +703,18 @@ class RecurrenceDialog(QDialog):
         self.monthly_widget.setVisible(self.radio_monthly.isChecked())
         self.yearly_widget.setVisible(self.radio_yearly.isChecked())
 
-    def on_start_time_changed(self):
-        """開始時間變更時，保持期間不變，更新結束時間"""
-        # 暫時阻止 duration_combo 信號以避免遞迴
-        self.duration_combo.blockSignals(True)
-        
-        duration = self.duration_combo.currentData()
-        if duration is not None:
-            start = self.start_time_edit.time()
-            start_minutes = start.hour() * 60 + start.minute()
-            end_minutes = start_minutes + duration
-
-            end_hour = (end_minutes // 60) % 24
-            end_minute = end_minutes % 60
-
-            self.end_time_edit.blockSignals(True)
-            self.end_time_edit.setTime(QTime(end_hour, end_minute))
-            self.end_time_edit.blockSignals(False)
-        
-        self.duration_combo.blockSignals(False)
-
-    def on_end_time_changed(self):
-        """結束時間變更時，反推期間"""
-        self.update_duration_from_times()
-
-    def update_duration_from_times(self):
-        """根據開始和結束時間計算期間"""
-        start = self.start_time_edit.time()
-        end = self.end_time_edit.time()
-
-        start_minutes = start.hour() * 60 + start.minute()
-        end_minutes = end.hour() * 60 + end.minute()
-
-        if end_minutes < start_minutes:
-            end_minutes += 24 * 60  # 跨日
-
-        duration = end_minutes - start_minutes
-
-        # 更新期間下拉選單而不觸發信號
-        self.duration_combo.blockSignals(True)
-        index = self.duration_combo.findData(duration)
-        if index >= 0:
-            self.duration_combo.setCurrentIndex(index)
-        else:
-            # 如果期間不在預設列表中，添加自訂期間
-            self.duration_combo.addItem(f"{duration} 分", duration)
-            self.duration_combo.setCurrentIndex(self.duration_combo.count() - 1)
-        self.duration_combo.blockSignals(False)
-
-    def on_duration_changed(self):
+    def on_duration_changed(self, index):
         """期間變更時更新結束時間"""
-        duration = self.duration_combo.currentData()
-        if duration is not None:
-            start = self.start_time_edit.time()
-            start_minutes = start.hour() * 60 + start.minute()
-            end_minutes = start_minutes + duration
-
-            end_hour = (end_minutes // 60) % 24
-            end_minute = end_minutes % 60
-
-            self.end_time_edit.blockSignals(True)
-            self.end_time_edit.setTime(QTime(end_hour, end_minute))
-            self.end_time_edit.blockSignals(False)
+        if not hasattr(self, "_updating_times") or not self._updating_times:
+            self._updating_times = True
+            try:
+                start_time = self.get_time_from_combo(self.start_time_combo)
+                duration_minutes = self.duration_combo.currentData()
+                if start_time and duration_minutes is not None:
+                    end_time = start_time.addSecs(duration_minutes * 60)
+                    self.set_combo_to_time(self.end_time_combo, end_time)
+            finally:
+                self._updating_times = False
 
     def on_ok_clicked(self):
         """確定按點擊"""
@@ -641,13 +739,19 @@ class RecurrenceDialog(QDialog):
         count = 0
 
         # 取得時間
-        time = self.start_time_edit.time()
+        time = self.get_time_from_combo(self.start_time_combo)
+        if not time:
+            time = QTime(9, 0)  # 預設值
         hour = time.hour()
         minute = time.minute()
 
         # 開始日期
         start_date = self.start_date_edit.date()
         dtstart = f"{start_date.year()}{start_date.month():02d}{start_date.day():02d}T{hour:02d}{minute:02d}00"
+
+        # 期間
+        duration_minutes = self.duration_combo.currentData() or 30
+        duration_str = f"DURATION=PT{duration_minutes}M"
 
         # 根據頻率設定
         if self.radio_daily.isChecked():
@@ -740,6 +844,7 @@ class RecurrenceDialog(QDialog):
             parts.append(f"UNTIL={until}")
 
         parts.append(f"DTSTART:{dtstart}")
+        parts.append(duration_str)
 
         return ";".join(parts)
 
@@ -757,6 +862,7 @@ class RecurrenceDialog(QDialog):
             bysetpos = ""
             byhour = 9
             byminute = 0
+            duration_minutes = 30
 
             # 解析 DTSTART
             dtstart_match = re.search(
@@ -770,7 +876,7 @@ class RecurrenceDialog(QDialog):
                 )
                 hour, minute = int(dtstart_match.group(4)), int(dtstart_match.group(5))
                 self.start_date_edit.setDate(QDate(year, month, day))
-                self.start_time_edit.setTime(QTime(hour, minute))
+                self.set_combo_to_time(self.start_time_combo, QTime(hour, minute))
                 byhour = hour
                 byminute = minute
 
@@ -792,6 +898,11 @@ class RecurrenceDialog(QDialog):
                     byhour = int(part.split("=")[1])
                 elif part.startswith("BYMINUTE="):
                     byminute = int(part.split("=")[1])
+                elif part.startswith("DURATION="):
+                    duration_str = part.split("=")[1]
+                    match = re.search(r"PT(\d+)M", duration_str)
+                    if match:
+                        duration_minutes = int(match.group(1))
                 elif part.startswith("COUNT="):
                     count = int(part.split("=")[1])
                     self.radio_end_after.setChecked(True)
@@ -807,8 +918,13 @@ class RecurrenceDialog(QDialog):
                     self.end_date_edit.setDate(QDate(year, month, day))
 
             # 設定時間
-            self.start_time_edit.setTime(QTime(byhour, byminute))
-            self.update_duration()
+            start_time = QTime(byhour, byminute)
+            self.set_combo_to_time(self.start_time_combo, start_time)
+            # 設定結束時間為開始時間加期間
+            end_time = start_time.addSecs(duration_minutes * 60)
+            self.set_combo_to_time(self.end_time_combo, end_time)
+            # 設定期間
+            self.set_duration_to_minutes(duration_minutes)
 
             # 設定頻率和詳細選項
             if freq == "DAILY":
@@ -985,6 +1101,20 @@ class RecurrenceDialog(QDialog):
                 QSpinBox:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
                     border: 2px solid #0e639c;
                 }
+                QComboBox QListView::item {
+                    background-color: #1e1e1e;
+                    color: #cccccc;
+                }
+                QComboBox QListView::item:selected {
+                    background-color: #094771;
+                    color: white;
+                }
+                QComboBox#startTimeCombo, QComboBox#endTimeCombo {
+                    color: white;
+                }
+                QComboBox#startTimeCombo QListView::item, QComboBox#endTimeCombo QListView::item {
+                    color: white;
+                }
                 QLabel {
                     color: #cccccc;
                 }
@@ -1075,6 +1205,14 @@ class RecurrenceDialog(QDialog):
                 }
                 QSpinBox:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
                     border: 2px solid #0078d4;
+                }
+                QComboBox::item {
+                    background-color: white;
+                    color: #333;
+                }
+                QComboBox::item:selected {
+                    background-color: #0078d4;
+                    color: white;
                 }
                 QLabel {
                     color: #333;

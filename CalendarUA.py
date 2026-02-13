@@ -1481,7 +1481,7 @@ class OPCSettingsDialog(QDialog):
     def setup_ui(self):
         self.setWindowTitle("OPC UA 連線設定")
         self.setMinimumWidth(900)
-        self.setMinimumHeight(520)
+        # 移除固定高度，讓視窗根據內容自動調整
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -1589,6 +1589,8 @@ class OPCSettingsDialog(QDialog):
         mode_layout.addWidget(self.rb_mode_none)
         mode_layout.addWidget(self.rb_mode_sign)
         mode_layout.addWidget(self.rb_mode_sign_encrypt)
+        # 添加間距以與 Security Policy 對齊
+        mode_layout.addStretch()
 
         # Security Policy list
         policy_group = QGroupBox("Security Policy")
@@ -1612,7 +1614,7 @@ class OPCSettingsDialog(QDialog):
 
         layout.addLayout(sec_mid_layout)
         
-        # 連線設定（下方）- 高度減少
+        # 連線設定（下方）
         connection_group = QGroupBox("連線設定")
         connection_layout = QHBoxLayout(connection_group)
         connection_layout.setContentsMargins(10, 8, 10, 8)
@@ -1927,6 +1929,9 @@ class OPCSettingsDialog(QDialog):
         self.client_key_label.setVisible(cert_visible)
         self.client_key_edit.setVisible(cert_visible)
         self.cert_browse_btn2.setVisible(cert_visible)
+
+        # 調整視窗大小以適應顯示的欄位
+        self.adjustSize()
 
     def on_chk_show_supported_toggled(self, checked: bool):
         """檢測或隱藏伺服器不支援的安全模式"""
