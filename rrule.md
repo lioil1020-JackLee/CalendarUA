@@ -145,29 +145,39 @@ BYHOUR=9;BYMINUTE=15     # 上午 9:15
 
 ### 11. DURATION (持續時間) - 自訂參數
 
-CalendarUA 專用的參數，指定任務執行的持續時間。
+CalendarUA 專用的參數，指定任務執行的持續時間。同時控制任務的重試行為：
+
+- **DURATION = PT0M (0 分鐘)**: 單次執行，任務失敗後不重試
+- **DURATION > PT0M (大於 0 分鐘)**: 持續執行模式，任務失敗後會重試直到成功或持續時間結束
 
 | 格式 | 範例 | 說明 |
 |------|------|------|
-| `PT{n}M` | `DURATION=PT30M` | 持續 30 分鐘 |
-| `PT{n}H` | `DURATION=PT2H` | 持續 2 小時 |
-| `PT{n}H{n}M` | `DURATION=PT1H30M` | 持續 1 小時 30 分鐘 |
+| `PT0M` | `DURATION=PT0M` | 單次執行，失敗不重試 |
+| `PT{n}M` | `DURATION=PT30M` | 持續 30 分鐘，重試直到成功或時間結束 |
+| `PT{n}H` | `DURATION=PT2H` | 持續 2 小時，重試直到成功或時間結束 |
+| `PT{n}H{n}M` | `DURATION=PT1H30M` | 持續 1 小時 30 分鐘，重試直到成功或時間結束 |
 
 ## 完整範例
 
-### 1. 每日排程
+### 1. 單次執行排程
+```
+RRULE:FREQ=DAILY;BYHOUR=8;BYMINUTE=0;DTSTART:20260214T080000;DURATION=PT0M
+```
+**說明**: 每天上午 8:00 執行一次，失敗不重試
+
+### 2. 持續執行排程
 ```
 RRULE:FREQ=DAILY;BYHOUR=8;BYMINUTE=0;DTSTART:20260214T080000;DURATION=PT30M
 ```
-**說明**: 每天上午 8:00 開始，持續 30 分鐘
+**說明**: 每天上午 8:00 開始，持續 30 分鐘，重試直到成功或時間結束
 
-### 2. 工作日排程
+### 3. 工作日排程
 ```
 RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0;DTSTART:20260214T090000;DURATION=PT1H
 ```
-**說明**: 每週一至週五上午 9:00 開始，持續 1 小時
+**說明**: 每週一至週五上午 9:00 開始，持續 1 小時，重試直到成功或時間結束
 
-### 3. 月度排程
+### 4. 月度排程
 ```
 RRULE:FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=10;BYMINUTE=0;DTSTART:20260201T100000;DURATION=PT2H
 ```
@@ -224,7 +234,7 @@ RRULE:FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1;BYHOUR=17;BYMINUTE=0;DTSTART:20260228T17
 | `BYMINUTE` | `0` | 整點 |
 | `COUNT` | 無限制 |  |
 | `UNTIL` | 無限制 |  |
-| `DURATION` | `PT5M` | 5 分鐘 |
+| `DURATION` | `PT0M` | 0 分鐘 (單次執行) |
 
 ## 資料儲存與解析
 

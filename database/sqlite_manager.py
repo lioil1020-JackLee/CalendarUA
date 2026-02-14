@@ -169,9 +169,15 @@ class SQLiteManager:
                 
                 if "opc_timeout" not in columns:
                     cursor.execute(
-                        "ALTER TABLE schedules ADD COLUMN opc_timeout INTEGER DEFAULT 10"
+                        "ALTER TABLE schedules ADD COLUMN opc_timeout INTEGER DEFAULT 5"
                     )
                     logger.info("已添加 opc_timeout 欄位")
+                
+                if "opc_write_timeout" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN opc_write_timeout INTEGER DEFAULT 3"
+                    )
+                    logger.info("已添加 opc_write_timeout 欄位")
                 
                 if "last_execution_status" not in columns:
                     cursor.execute(
@@ -208,7 +214,8 @@ class SQLiteManager:
         opc_security_mode: str = "None",
         opc_username: str = "",
         opc_password: str = "",
-        opc_timeout: int = 10,
+        opc_timeout: int = 5,
+        opc_write_timeout: int = 3,
         is_enabled: int = 1,
     ) -> Optional[int]:
         """
@@ -226,6 +233,7 @@ class SQLiteManager:
             opc_username: OPC使用者名稱
             opc_password: OPC密碼
             opc_timeout: 連線超時秒數
+            opc_write_timeout: 寫值重試延遲秒數
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
 
         Returns:
@@ -233,8 +241,8 @@ class SQLiteManager:
         """
         insert_sql = """
         INSERT INTO schedules (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, is_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         try:
@@ -243,7 +251,7 @@ class SQLiteManager:
                 cursor.execute(
                     insert_sql,
                     (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, is_enabled),
+                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled),
                 )
                 conn.commit()
                 new_id = cursor.lastrowid
@@ -332,7 +340,8 @@ class SQLiteManager:
         opc_security_mode: str = "None",
         opc_username: str = "",
         opc_password: str = "",
-        opc_timeout: int = 10,
+        opc_timeout: int = 5,
+        opc_write_timeout: int = 3,
         is_enabled: int = 1,
     ) -> Optional[int]:
         """
@@ -349,6 +358,7 @@ class SQLiteManager:
             opc_username: OPC使用者名稱
             opc_password: OPC密碼
             opc_timeout: 連線超時秒數
+            opc_write_timeout: 寫值重試延遲秒數
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
 
         Returns:
@@ -366,6 +376,7 @@ class SQLiteManager:
             opc_username=opc_username,
             opc_password=opc_password,
             opc_timeout=opc_timeout,
+            opc_write_timeout=opc_write_timeout,
             is_enabled=is_enabled,
         )
 
@@ -420,6 +431,7 @@ class SQLiteManager:
             "opc_username",
             "opc_password",
             "opc_timeout",
+            "opc_write_timeout",
             "is_enabled",
             "last_execution_status",
             "last_execution_time",

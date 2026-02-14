@@ -94,6 +94,8 @@ class SchedulerWorker(QThread):
         self.check_interval = check_interval
         self.running = True
         self.last_check = datetime.now()
+        # 記錄每個排程的上次觸發時間，防止重複觸發
+        self.last_trigger_times: Dict[int, datetime] = {}
 
     def run(self):
         """持續檢查排程"""
@@ -122,14 +124,23 @@ class SchedulerWorker(QThread):
 
     def should_trigger(self, schedule: Dict[str, Any], current_time: datetime) -> bool:
         """檢查是否應該觸發排程"""
+        schedule_id = schedule.get("id")
         rrule_str = schedule.get("rrule_str", "")
         if not rrule_str:
             return False
 
+        # 檢查是否已經在最近60秒內觸發過，防止重複觸發
+        last_trigger = self.last_trigger_times.get(schedule_id)
+        if last_trigger and (current_time - last_trigger).total_seconds() < 60:
+            return False
+
         # 使用 RRuleParser 檢查是否為觸發時間
-        return RRuleParser.is_trigger_time(
-            rrule_str, current_time, tolerance_seconds=30
-        )
+        if RRuleParser.is_trigger_time(rrule_str, current_time, tolerance_seconds=30):
+            # 記錄觸發時間
+            self.last_trigger_times[schedule_id] = current_time
+            return True
+
+        return False
 
     def stop(self):
         """停止工作執行緒"""
@@ -149,6 +160,9 @@ class CalendarUA(QMainWindow):
         
         # 執行計數器：schedule_id -> 已執行次數
         self.execution_counts: Dict[int, int] = {}
+        
+        # 正在執行的任務ID集合，防止重複執行
+        self.running_tasks: set[int] = set()
 
         # 主題模式: "light", "dark", "system"
         self.current_theme = "system"
@@ -875,7 +889,12 @@ class CalendarUA(QMainWindow):
             self.schedule_table.setItem(row, 3, last_time_item)
 
             # 下次執行時間
-            next_execution_time = self._calculate_next_execution_time(schedule)
+            is_enabled = schedule.get("is_enabled", 0)
+            if is_enabled:
+                next_execution_time = self._calculate_next_execution_time(schedule)
+            else:
+                next_execution_time = "-"
+            
             next_time_item = QTableWidgetItem(next_execution_time)
             next_time_item.setTextAlignment(Qt.AlignCenter)
             
@@ -894,7 +913,7 @@ class CalendarUA(QMainWindow):
             schedule_item.setTextAlignment(Qt.AlignCenter)
             self.schedule_table.setItem(row, 5, schedule_item)
 
-            # 節點名稱 - 從 node_id 提取最後一部分作為顯示名稱
+            # 節點名稱 - 從 node_id 提取顯示名稱
             node_id = schedule.get("node_id", "")
             node_name = self._format_node_name(node_id)
             node_item = QTableWidgetItem(node_name)
@@ -1111,8 +1130,21 @@ class CalendarUA(QMainWindow):
         try:
             # 檢查是否包含 display_name|node_id 格式
             if "|" in node_id:
-                display_name, actual_node_id = node_id.split("|", 1)
-                return display_name
+                parts = node_id.split("|")
+                if len(parts) >= 2:
+                    display_name = parts[0]
+                    actual_node_id = parts[1]
+                    # 優先從 actual_node_id 提取完整路徑
+                    if actual_node_id.startswith("ns="):
+                        ns_parts = actual_node_id.split(";")
+                        if len(ns_parts) > 1:
+                            last_part = ns_parts[-1]
+                            if last_part.startswith("s="):
+                                full_path = last_part[2:]
+                                if full_path:
+                                    return full_path
+                    # 如果無法提取完整路徑，返回 display_name
+                    return display_name
             
             # 處理 OPC UA NodeId 的字串表示
             if node_id.startswith("NodeId("):
@@ -1261,7 +1293,8 @@ class CalendarUA(QMainWindow):
                     opc_security_mode=data.get("opc_security_mode", "None"),
                     opc_username=data.get("opc_username", ""),
                     opc_password=data.get("opc_password", ""),
-                    opc_timeout=data.get("opc_timeout", 10),
+                    opc_timeout=data.get("opc_timeout", 5),
+                    opc_write_timeout=data.get("opc_write_timeout", 3),
                     is_enabled=data.get("is_enabled", 1),
                 )
 
@@ -1296,7 +1329,8 @@ class CalendarUA(QMainWindow):
                     opc_security_mode=data.get("opc_security_mode", "None"),
                     opc_username=data.get("opc_username", ""),
                     opc_password=data.get("opc_password", ""),
-                    opc_timeout=data.get("opc_timeout", 10),
+                    opc_timeout=data.get("opc_timeout", 5),
+                    opc_write_timeout=data.get("opc_write_timeout", 3),
                     is_enabled=data.get("is_enabled", 1),
                 )
 
@@ -1379,6 +1413,16 @@ class CalendarUA(QMainWindow):
     @Slot(dict)
     def on_task_triggered(self, schedule: Dict[str, Any]):
         """處理排程觸發"""
+        schedule_id = schedule.get("id")
+        
+        # 檢查是否已經在執行，防止重複執行
+        if schedule_id in self.running_tasks:
+            self.status_bar.showMessage(f"任務 {schedule.get('task_name', '')} 已在執行中，跳過此次觸發", 3000)
+            return
+        
+        # 標記為執行中
+        self.running_tasks.add(schedule_id)
+        
         self.status_bar.showMessage(f"執行排程: {schedule.get('task_name', '')}")
 
         # 執行 OPC UA 寫入
@@ -1423,7 +1467,8 @@ class CalendarUA(QMainWindow):
         security_policy = schedule.get("opc_security_policy", "None")
         username = schedule.get("opc_username", "")
         password = schedule.get("opc_password", "")
-        timeout = schedule.get("opc_timeout", 10)
+        timeout = schedule.get("opc_timeout", 5)
+        write_timeout = schedule.get("opc_write_timeout", 3)
 
         try:
             # 更新狀態為執行中
@@ -1447,41 +1492,78 @@ class CalendarUA(QMainWindow):
 
             async with handler:
                 if handler.is_connected:
-                    # 重試機制：最多重試3次，每次間隔5秒
-                    max_retries = 3
-                    retry_delay = 5
+                    # 重試機制：根據期間決定重試策略
+                    duration_minutes = self._parse_duration_from_rrule(schedule.get("rrule_str", ""))
                     
-                    for attempt in range(max_retries):
+                    if duration_minutes == 0:
+                        # 期間=0分：只嘗試寫入一次，不重試
+                        max_retries = 1
+                        retry_delay = write_timeout
+                    else:
+                        # 期間>0分：持續寫入直到成功或結束時間到
+                        max_retries = float('inf')  # 無限重試，直到成功或時間到
+                        retry_delay = write_timeout
+                    
+                    attempt = 0
+                    success_once = False
+                    
+                    while attempt < max_retries and not success_once:
+                        # 檢查是否超過結束時間（對於期間>0的情況）
+                        if duration_minutes > 0:
+                            current_time = datetime.now()
+                            # 這裡需要解析結束時間，簡化處理：假設結束時間是開始時間 + 期間
+                            # 實際上應該從RRULE解析結束時間
+                            if current_time >= self._calculate_end_time(schedule):
+                                break  # 超過結束時間，停止重試
+                        
                         try:
                             success = await handler.write_node(actual_node_id, target_value, data_type)
                             if success:
                                 status_msg = f"✓ 成功寫入 {node_id} = {target_value}"
+                                success_once = True
                                 if self.db_manager:
                                     self.db_manager.update_execution_status(schedule_id, "執行成功")
                                     # 增加執行計數器
                                     self.execution_counts[schedule_id] = self.execution_counts.get(schedule_id, 0) + 1
                                     # 檢查是否達到 COUNT 上限
                                     self._check_and_disable_if_count_reached(schedule_id, schedule.get("rrule_str", ""))
-                                break  # 成功後跳出重試循環
+                                break  # 成功一次就結束
                             else:
-                                if attempt < max_retries - 1:  # 不是最後一次嘗試
-                                    status_msg = f"寫入失敗，正在重試 ({attempt + 1}/{max_retries})..."
-                                    logger.warning(f"寫入失敗，正在等待 {retry_delay} 秒後重試 ({attempt + 1}/{max_retries})")
-                                    await asyncio.sleep(retry_delay)
-                                else:  # 最後一次嘗試失敗
-                                    status_msg = f"✗ 寫入失敗: {node_id} (已重試 {max_retries} 次)"
+                                if attempt < max_retries - 1 or max_retries == float('inf'):
+                                    if duration_minutes == 0:
+                                        # 期間=0分，只嘗試一次
+                                        status_msg = f"✗ 寫入失敗: {node_id}"
+                                        if self.db_manager:
+                                            self.db_manager.update_execution_status(schedule_id, "寫入失敗")
+                                    else:
+                                        # 期間>0分，正在重試
+                                        status_msg = f"寫入失敗，正在等待 {retry_delay} 秒後重試..."
+                                        logger.warning(f"寫入失敗，正在等待 {retry_delay} 秒後重試")
+                                        await asyncio.sleep(retry_delay)
+                                else:
+                                    # 最後一次嘗試失敗
+                                    status_msg = f"✗ 寫入失敗: {node_id}"
                                     if self.db_manager:
-                                        self.db_manager.update_execution_status(schedule_id, f"寫入失敗(重試{max_retries}次)")
+                                        self.db_manager.update_execution_status(schedule_id, "寫入失敗")
                         except Exception as e:
-                            if attempt < max_retries - 1:  # 不是最後一次嘗試
-                                status_msg = f"執行錯誤，正在重試 ({attempt + 1}/{max_retries})..."
-                                logger.warning(f"寫入錯誤: {e}，正在等待 {retry_delay} 秒後重試 ({attempt + 1}/{max_retries})")
-                                await asyncio.sleep(retry_delay)
-                            else:  # 最後一次嘗試失敗
-                                status_msg = f"✗ 執行錯誤: {str(e)[:50]} (已重試 {max_retries} 次)"
+                            if attempt < max_retries - 1 or max_retries == float('inf'):
+                                if duration_minutes == 0:
+                                    # 期間=0分，只嘗試一次
+                                    status_msg = f"✗ 執行錯誤: {str(e)[:50]}"
+                                    if self.db_manager:
+                                        self.db_manager.update_execution_status(schedule_id, f"執行錯誤: {str(e)[:50]}")
+                                else:
+                                    # 期間>0分，正在重試
+                                    status_msg = f"執行錯誤，正在等待 {retry_delay} 秒後重試..."
+                                    logger.warning(f"寫入錯誤: {e}，正在等待 {retry_delay} 秒後重試")
+                                    await asyncio.sleep(retry_delay)
+                            else:
+                                # 最後一次嘗試失敗
+                                status_msg = f"✗ 執行錯誤: {str(e)[:50]}"
                                 if self.db_manager:
-                                    self.db_manager.update_execution_status(schedule_id, f"執行錯誤(重試{max_retries}次)")
+                                    self.db_manager.update_execution_status(schedule_id, f"執行錯誤: {str(e)[:50]}")
                                 break
+                        attempt += 1
                     else:
                         # 如果所有重試都失敗，這裡不會執行，因為break會跳出
                         pass
@@ -1498,6 +1580,49 @@ class CalendarUA(QMainWindow):
         # 更新狀態列和重新載入表格
         self.status_bar.showMessage(status_msg, 5000)
         self.load_schedules()
+        
+        # 從執行中任務集合中移除
+        self.running_tasks.discard(schedule_id)
+
+    def _parse_duration_from_rrule(self, rrule_str: str) -> int:
+        """從RRULE字串中解析期間參數（分鐘）"""
+        if not rrule_str:
+            return 0
+        
+        try:
+            parts = rrule_str.upper().split(';')
+            for part in parts:
+                if part.startswith('DURATION=PT'):
+                    # 格式如: DURATION=PT5M
+                    duration_str = part.split('=')[1]  # PT5M
+                    if duration_str.endswith('M'):
+                        minutes = int(duration_str[2:-1])  # 移除PT和M
+                        return minutes
+        except Exception:
+            pass
+        return 0
+
+    def _calculate_end_time(self, schedule: Dict[str, Any]) -> datetime:
+        """計算任務的結束時間"""
+        # 簡化實作：從開始時間 + 期間計算
+        # 實際應該從RRULE解析完整的結束時間
+        start_time_str = schedule.get("start_time", "")
+        duration_minutes = self._parse_duration_from_rrule(schedule.get("rrule_str", ""))
+        
+        try:
+            # 假設start_time是HH:MM格式，轉換為今天的datetime
+            today = datetime.now().date()
+            time_part = datetime.strptime(start_time_str, "%H:%M").time()
+            start_datetime = datetime.combine(today, time_part)
+            
+            # 如果開始時間已經過去，可能是明天
+            if start_datetime < datetime.now():
+                start_datetime += timedelta(days=1)
+            
+            return start_datetime + timedelta(minutes=duration_minutes)
+        except Exception:
+            # 預設1小時後結束
+            return datetime.now() + timedelta(hours=1)
 
     def _check_and_disable_if_count_reached(self, schedule_id: int, rrule_str: str):
         """檢查是否達到 COUNT 上限，如果是則停用排程"""
@@ -1566,8 +1691,32 @@ class CalendarUA(QMainWindow):
 
     def closeEvent(self, event):
         """處理視窗關閉事件"""
+        import asyncio
+
+        # 停止排程器
         if self.scheduler_worker:
             self.scheduler_worker.stop()
+
+        # 取消所有正在執行的async任務
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 取消所有待處理的任務
+                pending_tasks = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                for task in pending_tasks:
+                    task.cancel()
+
+                # 等待任務取消完成，最多等待2秒
+                import time
+                start_time = time.time()
+                while pending_tasks and (time.time() - start_time) < 2.0:
+                    # 簡單的輪詢等待
+                    time.sleep(0.1)
+                    pending_tasks = [task for task in pending_tasks if not task.done()]
+
+        except RuntimeError:
+            # 沒有事件迴圈或已經關閉
+            pass
 
         event.accept()
 
@@ -1964,13 +2113,14 @@ class OPCNodeBrowserDialog(QDialog):
 class OPCSettingsDialog(QDialog):
     """OPC UA 設定對話框"""
 
-    def __init__(self, parent=None, security_policy="None", username="", password="", timeout=10, security_mode="None", opc_url: str = ""):
+    def __init__(self, parent=None, security_policy="None", username="", password="", timeout=5, write_timeout=3, security_mode="None", opc_url: str = ""):
         super().__init__(parent)
         self.security_policy = security_policy
         self.security_mode = security_mode
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.write_timeout = write_timeout
         self.opc_url = opc_url
         self._detected_supported = None
         
@@ -2133,9 +2283,15 @@ class OPCSettingsDialog(QDialog):
         connection_layout.addWidget(QLabel("連線超時 (秒):"))
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(1, 300)
-        self.timeout_spin.setValue(10)
+        self.timeout_spin.setValue(5)
         self.timeout_spin.setFixedWidth(80)
         connection_layout.addWidget(self.timeout_spin)
+        connection_layout.addWidget(QLabel("寫值重試延遲 (秒):"))
+        self.write_timeout_spin = QSpinBox()
+        self.write_timeout_spin.setRange(1, 60)
+        self.write_timeout_spin.setValue(3)
+        self.write_timeout_spin.setFixedWidth(80)
+        connection_layout.addWidget(self.write_timeout_spin)
         connection_layout.addStretch()
         layout.addWidget(connection_group)
 
@@ -2362,6 +2518,7 @@ class OPCSettingsDialog(QDialog):
         self.username_edit.setText(self.username)
         self.password_edit.setText(self.password)
         self.timeout_spin.setValue(self.timeout)
+        self.write_timeout_spin.setValue(self.write_timeout)
 
         # 初始化安全模式
         mode_mapping = {
@@ -2415,6 +2572,7 @@ class OPCSettingsDialog(QDialog):
             "client_cert": self.client_cert_edit.text(),
             "client_key": self.client_key_edit.text(),
             "timeout": self.timeout_spin.value(),
+            "write_timeout": self.write_timeout_spin.value(),
             "show_only_supported": self.chk_show_supported.isChecked(),
         }
 
@@ -2683,7 +2841,8 @@ class ScheduleEditDialog(QDialog):
         self.opc_security_mode = schedule.get("opc_security_mode", "None") if schedule else "None"
         self.opc_username = schedule.get("opc_username", "") if schedule else ""
         self.opc_password = schedule.get("opc_password", "") if schedule else ""
-        self.opc_timeout = schedule.get("opc_timeout", 10) if schedule else 10
+        self.opc_timeout = schedule.get("opc_timeout", 5) if schedule else 5
+        self.opc_write_timeout = schedule.get("opc_write_timeout", 3) if schedule else 3
         self.is_enabled = schedule.get("is_enabled", 1) if schedule else 1
 
         self.setup_ui()
@@ -3030,6 +3189,7 @@ class ScheduleEditDialog(QDialog):
             "opc_username": self.opc_username,
             "opc_password": self.opc_password,
             "opc_timeout": self.opc_timeout,
+            "opc_write_timeout": self.opc_write_timeout,
             "is_enabled": 1 if self.enabled_checkbox.isChecked() else 0,
         }
 
@@ -3126,6 +3286,7 @@ class ScheduleEditDialog(QDialog):
             self.opc_username,
             self.opc_password,
             self.opc_timeout,
+            self.opc_write_timeout,
             self.opc_security_mode,
             opc_url=opc_url,
         )
@@ -3137,6 +3298,7 @@ class ScheduleEditDialog(QDialog):
             self.opc_username = settings["username"]
             self.opc_password = settings["password"]
             self.opc_timeout = settings["timeout"]
+            self.opc_write_timeout = settings["write_timeout"]
 
     def _normalize_opc_url(self) -> str:
         """標準化 OPC URL，確保以 opc.tcp:// 開頭"""

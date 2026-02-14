@@ -20,7 +20,7 @@ class OPCHandler:
     - 加密傳輸
     """
 
-    def __init__(self, url: str, timeout: int = 10):
+    def __init__(self, url: str, timeout: int = 5):
         """
         初始化 OPC UA 處理器
 

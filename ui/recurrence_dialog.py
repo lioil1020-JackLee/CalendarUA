@@ -188,7 +188,7 @@ class RecurrenceDialog(QDialog):
         ]
         for text, minutes in durations:
             self.duration_combo.addItem(text, minutes)
-        self.duration_combo.setCurrentIndex(1)  # 預設改為 5 分
+        self.duration_combo.setCurrentIndex(0)  # 預設為 0 分
 
     def connect_signals(self):
         """連接信號"""
@@ -839,15 +839,15 @@ class RecurrenceDialog(QDialog):
         if not hasattr(self, "_updating_times") or not self._updating_times:
             self._updating_times = True
             try:
-                start_time = self.get_time_from_combo(self.start_time_combo)
+                start_time = self.start_time_edit.time()
                 duration_minutes = self.get_duration_minutes()
                 # 選取內建項目時，取消自訂旗標
                 if self.duration_combo.currentIndex() >= 0:
                     self._using_custom_duration = False
 
-                if start_time and duration_minutes is not None:
+                if duration_minutes is not None:
                     end_time = start_time.addSecs(duration_minutes * 60)
-                    self.set_combo_to_time(self.end_time_combo, end_time)
+                    self.end_time_edit.setTime(end_time)
             finally:
                 self._updating_times = False
 
