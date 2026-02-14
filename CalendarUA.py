@@ -1622,15 +1622,15 @@ class OPCNodeBrowserDialog(QDialog):
 
         button_layout.addSpacing(20)
 
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_btn)
-
         self.select_btn = QPushButton("選擇")
         self.select_btn.setDefault(True)
         self.select_btn.setEnabled(False)
         self.select_btn.clicked.connect(self.accept)
         button_layout.addWidget(self.select_btn)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
 
         layout.addLayout(button_layout)
 
