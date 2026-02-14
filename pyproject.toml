@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "CalendarUA"
+version = "1.0.0"
+description = "工業自動化排程管理系統"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "PySide6==6.7.2",
+    "asyncua==1.1.5",
+    "python-dateutil==2.9.0",
+    "qasync==0.27.1",
+]
+
+[tool.setuptools]
+packages = ["core", "database", "ui"]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.18.0",
+]

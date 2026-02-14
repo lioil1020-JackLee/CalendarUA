@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 from PySide6.QtCore import Qt, QDate, QTime, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 import sys
 
 
@@ -35,6 +35,7 @@ class RecurrenceDialog(QDialog):
         super().__init__(parent)
         self.current_rrule = current_rrule
         self.setWindowTitle("週期性約會")
+        self.setWindowIcon(QIcon('lioil.ico'))
         self.setMinimumWidth(570)
         self.setMinimumHeight(480)
         self.setModal(True)

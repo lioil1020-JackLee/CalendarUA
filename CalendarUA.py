@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QIcon
 import qasync
 import re
 
@@ -143,7 +143,8 @@ class CalendarUA(QMainWindow):
 
     def setup_ui(self):
         """設定使用者介面"""
-        self.setWindowTitle("CalendarUA - 工業自動化排程管理系統")
+        self.setWindowTitle("CalendarUA")
+        self.setWindowIcon(QIcon('lioil.ico'))
         self.setMinimumSize(1200, 800)
 
         # 建立中央widget
@@ -1614,6 +1615,7 @@ class OPCNodeBrowserDialog(QDialog):
     def setup_ui(self):
         """設定介面"""
         self.setWindowTitle("瀏覽 OPC UA 節點")
+        self.setWindowIcon(QIcon('lioil.ico'))
         self.setMinimumSize(500, 400)
         self.setModal(True)
 
@@ -1992,6 +1994,7 @@ class OPCSettingsDialog(QDialog):
 
     def setup_ui(self):
         self.setWindowTitle("OPC UA 連線設定")
+        self.setWindowIcon(QIcon('lioil.ico'))
         self.setMinimumWidth(900)
         # 移除固定高度，讓視窗根據內容自動調整
         self.setModal(True)
@@ -2700,6 +2703,7 @@ class ScheduleEditDialog(QDialog):
 
     def setup_ui(self):
         self.setWindowTitle("編輯排程" if self.schedule else "新增排程")
+        self.setWindowIcon(QIcon('lioil.ico'))
         self.setMinimumWidth(500)
         self.setModal(True)
 

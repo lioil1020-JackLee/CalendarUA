@@ -36,6 +36,7 @@ class DatabaseSettingsDialog(QDialog):
         super().__init__(parent)
         self.db_manager = db_manager
         self.setWindowTitle("資料庫設定")
+        self.setWindowIcon(QIcon('lioil.ico'))
         self.setMinimumWidth(500)
         self.setMinimumHeight(400)
         self.setModal(True)
