@@ -339,11 +339,12 @@ class CalendarUA(QMainWindow):
     def setup_system_tray(self):
         """設定系統托盤"""
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+        self.tray_icon.setIcon(get_app_icon())  # 使用應用圖標
+        self.tray_icon.setToolTip("CalendarUA - 工業自動化排程管理系統")
 
         tray_menu = QMenu()
         show_action = QAction("顯示", self)
-        show_action.triggered.connect(self.show)
+        show_action.triggered.connect(self.show_window)
         tray_menu.addAction(show_action)
 
         tray_menu.addSeparator()
@@ -354,13 +355,22 @@ class CalendarUA(QMainWindow):
 
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
+        self.tray_icon.show()  # 總是顯示托盤圖標
 
     def on_tray_activated(self, reason):
         """處理托盤圖示點擊"""
         if reason == QSystemTrayIcon.DoubleClick:
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
             self.show()
             self.raise_()
-            self.activateWindow()
+            QTimer.singleShot(100, self.activateWindow)
+
+    def show_window(self):
+        """顯示視窗並置於最上層"""
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show()
+        self.raise_()
+        QTimer.singleShot(100, self.activateWindow)
 
     def apply_modern_style(self):
         """套用現代化樣式，根據主題模式選擇亮色或暗色主題"""
@@ -1560,6 +1570,28 @@ class CalendarUA(QMainWindow):
             self.scheduler_worker.stop()
 
         event.accept()
+
+    def changeEvent(self, event):
+        """處理視窗狀態變化事件"""
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.WindowStateChange:
+            if self.windowState() & Qt.WindowMinimized:
+                # 最小化時延遲隱藏視窗，確保托盤圖標正確顯示
+                QTimer.singleShot(100, self._minimize_to_tray)
+            elif self.windowState() == Qt.WindowNoState:
+                # 從最小化恢復時顯示視窗
+                self.show()
+                self.raise_()
+                self.activateWindow()
+        super().changeEvent(event)
+
+    def _minimize_to_tray(self):
+        """將視窗最小化到系統托盤"""
+        if self.windowState() & Qt.WindowMinimized:
+            self.hide()
+            self.tray_icon.show()
+            # 設定工具提示
+            self.tray_icon.setToolTip("CalendarUA - 點擊以顯示")
 
 
 class OPCNodeBrowserDialog(QDialog):
