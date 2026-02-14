@@ -924,9 +924,12 @@ class RecurrenceDialog(QDialog):
 
     def on_ok_clicked(self):
         """確定按點擊"""
-        rrule_str = self.build_rrule()
-        self.rrule_created.emit(rrule_str)
-        self.accept()
+        try:
+            rrule_str = self.build_rrule()
+            self.rrule_created.emit(rrule_str)
+            self.accept()
+        except Exception as e:
+            QMessageBox.warning(self, "錯誤", f"建立週期規則時發生錯誤：{str(e)}")
 
     def build_rrule(self) -> str:
         """建立 RRULE 字串"""
@@ -940,9 +943,7 @@ class RecurrenceDialog(QDialog):
         count = 0
 
         # 取得時間
-        time = self.get_time_from_combo(self.start_time_combo)
-        if not time:
-            time = QTime(9, 0)  # 預設值
+        time = self.start_time_edit.time()
         hour = time.hour()
         minute = time.minute()
 
