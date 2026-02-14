@@ -27,6 +27,27 @@ from datetime import datetime
 from database.sqlite_manager import SQLiteManager
 
 
+def get_app_icon():
+    """獲取應用程式圖示，支援打包環境"""
+    import sys
+    # 優先檢查打包環境中的圖示
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包環境
+        base_path = sys._MEIPASS
+        icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
+        icon_path = os.path.join(base_path, icon_name)
+        if os.path.exists(icon_path):
+            return QIcon(icon_path)
+
+    # 開發環境：檢查當前目錄
+    icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
+    if os.path.exists(icon_name):
+        return QIcon(icon_name)
+
+    # 預設圖示
+    return QIcon()
+
+
 class DatabaseSettingsDialog(QDialog):
     """資料庫設定對話框"""
 
@@ -36,7 +57,7 @@ class DatabaseSettingsDialog(QDialog):
         super().__init__(parent)
         self.db_manager = db_manager
         self.setWindowTitle("資料庫設定")
-        self.setWindowIcon(QIcon('lioil.ico'))
+        self.setWindowIcon(get_app_icon())
         self.setMinimumWidth(500)
         self.setMinimumHeight(400)
         self.setModal(True)

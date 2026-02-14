@@ -60,6 +60,29 @@ from ui.recurrence_dialog import RecurrenceDialog, show_recurrence_dialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
 
 
+def get_app_icon():
+    """獲取應用程式圖示，支援打包環境"""
+    import sys
+    import os
+
+    # 優先檢查打包環境中的圖示
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包環境
+        base_path = sys._MEIPASS
+        icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
+        icon_path = os.path.join(base_path, icon_name)
+        if os.path.exists(icon_path):
+            return QIcon(icon_path)
+
+    # 開發環境：檢查當前目錄
+    icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
+    if os.path.exists(icon_name):
+        return QIcon(icon_name)
+
+    # 預設圖示
+    return QIcon()
+
+
 class SchedulerWorker(QThread):
     """背景排程工作執行緒"""
 
@@ -144,7 +167,7 @@ class CalendarUA(QMainWindow):
     def setup_ui(self):
         """設定使用者介面"""
         self.setWindowTitle("CalendarUA")
-        self.setWindowIcon(QIcon('lioil.ico'))
+        self.setWindowIcon(get_app_icon())
         self.setMinimumSize(1200, 800)
 
         # 建立中央widget
@@ -1556,7 +1579,7 @@ class OPCNodeBrowserDialog(QDialog):
     def setup_ui(self):
         """設定介面"""
         self.setWindowTitle("瀏覽 OPC UA 節點")
-        self.setWindowIcon(QIcon('lioil.ico'))
+        self.setWindowIcon(get_app_icon())
         self.setMinimumSize(500, 400)
         self.setModal(True)
 
@@ -1935,7 +1958,7 @@ class OPCSettingsDialog(QDialog):
 
     def setup_ui(self):
         self.setWindowTitle("OPC UA 連線設定")
-        self.setWindowIcon(QIcon('lioil.ico'))
+        self.setWindowIcon(get_app_icon())
         self.setMinimumWidth(900)
         # 移除固定高度，讓視窗根據內容自動調整
         self.setModal(True)
@@ -2644,7 +2667,7 @@ class ScheduleEditDialog(QDialog):
 
     def setup_ui(self):
         self.setWindowTitle("編輯排程" if self.schedule else "新增排程")
-        self.setWindowIcon(QIcon('lioil.ico'))
+        self.setWindowIcon(get_app_icon())
         self.setMinimumWidth(500)
         self.setModal(True)
 
@@ -3119,4 +3142,4 @@ def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

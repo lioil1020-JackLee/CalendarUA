@@ -2,7 +2,7 @@
 import os
 import sys
 
-# 資源清單：本專案無需額外資料夾
+# 資源清單：包含圖示檔案
 datas_list = []
 
 # 根據平台設定應用程式名稱
@@ -12,11 +12,11 @@ app_name = 'CalendarUA-macos' if sys.platform == 'darwin' else 'CalendarUA-onedi
 icon_param = None
 if sys.platform == 'darwin':  # macOS
     if os.path.exists('lioil.icns'):
-        datas_list.insert(0, ('lioil.icns', '.'))
+        datas_list.append(('lioil.icns', '.'))
         icon_param = 'lioil.icns'
-else:  # Windows
+elif os.name == 'nt':  # Windows
     if os.path.exists('lioil.ico'):
-        datas_list.insert(0, ('lioil.ico', '.'))
+        datas_list.append(('lioil.ico', '.'))
         icon_param = 'lioil.ico'
 
 a = Analysis(
