@@ -1740,7 +1740,7 @@ class CalendarUA(QMainWindow):
             self.hide()
             self.tray_icon.show()
             # 設定工具提示
-            self.tray_icon.setToolTip("CalendarUA - 點擊以顯示")
+            self.tray_icon.setToolTip("CalendarUA")
 
 
 class OPCNodeBrowserDialog(QDialog):
