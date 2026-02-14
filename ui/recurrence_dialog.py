@@ -1429,11 +1429,39 @@ class RecurrenceDialog(QDialog):
         """事件過濾器，用於處理時間 combo box 的鍵盤輸入"""
         if obj in [self.start_time_combo.lineEdit(), self.end_time_combo.lineEdit()]:
             if event.type() == QEvent.KeyPress:
-                # 確保刪除和退格鍵正常工作
-                if event.key() in [Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End]:
-                    # 讓預設處理繼續，但確保事件被接受
-                    event.accept()
+                line_edit = obj
+                current_text = line_edit.text()
+                cursor_pos = line_edit.cursorPosition()
+
+                # 處理刪除和退格鍵，確保只刪除一個字符
+                if event.key() == Qt.Key_Delete:
+                    # Delete鍵：刪除游標後的字符
+                    if cursor_pos < len(current_text):
+                        new_text = current_text[:cursor_pos] + current_text[cursor_pos + 1:]
+                        line_edit.setText(new_text)
+                        line_edit.setCursorPosition(cursor_pos)
+                        event.accept()
+                        return True
+                    else:
+                        event.accept()
+                        return True
+
+                elif event.key() == Qt.Key_Backspace:
+                    # Backspace鍵：刪除游標前的字符
+                    if cursor_pos > 0:
+                        new_text = current_text[:cursor_pos - 1] + current_text[cursor_pos:]
+                        line_edit.setText(new_text)
+                        line_edit.setCursorPosition(cursor_pos - 1)
+                        event.accept()
+                        return True
+                    else:
+                        event.accept()
+                        return True
+
+                # 對於其他鍵盤事件，讓預設處理繼續
+                elif event.key() in [Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End]:
                     return False
+
         return super().eventFilter(obj, event)
 
 
