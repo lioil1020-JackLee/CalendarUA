@@ -36,7 +36,7 @@ class RecurrenceDialog(QDialog):
         super().__init__(parent)
         self.current_rrule = current_rrule
         self.setWindowTitle("週期性約會")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(570)
         self.setMinimumHeight(480)
         self.setModal(True)
 
@@ -44,8 +44,14 @@ class RecurrenceDialog(QDialog):
         self.apply_modern_style()
         self.connect_signals()
 
-        if current_rrule:
-            self.parse_existing_rrule(current_rrule)
+        # 初始化結束條件控制項狀態
+        self.on_end_condition_changed(self.radio_end_never, True)
+
+        # 初始化頻率選擇的顯示狀態
+        self.on_frequency_changed()
+
+        # 初始化時間同步：確保結束時間根據期間正確計算
+        self.on_start_time_changed(None)
 
     def setup_ui(self):
         """設定主介面"""
@@ -137,7 +143,7 @@ class RecurrenceDialog(QDialog):
         ]
         for text, minutes in durations:
             self.duration_combo.addItem(text, minutes)
-        self.duration_combo.setCurrentIndex(4)  # 預設 30 分
+        self.duration_combo.setCurrentIndex(1)  # 預設改為 5 分
 
     def populate_time_combo(self, combo: QComboBox):
         """填充時間下拉選單"""
@@ -179,6 +185,9 @@ class RecurrenceDialog(QDialog):
         self.radio_monthly.toggled.connect(self.on_frequency_changed)
         self.radio_yearly.toggled.connect(self.on_frequency_changed)
 
+        # 結束條件變更
+        self.end_button_group.buttonToggled.connect(self.on_end_condition_changed)
+
     def on_start_time_changed(self, value):
         """開始時間改變時更新結束時間"""
         if not hasattr(self, "_updating_times") or not self._updating_times:
@@ -187,6 +196,8 @@ class RecurrenceDialog(QDialog):
                 start_time = self.get_time_from_combo(self.start_time_combo)
                 duration_minutes = self.duration_combo.currentData()
                 if start_time and duration_minutes is not None:
+                    # 重新格式化開始時間顯示，確保上午/下午格式正確
+                    self.set_combo_to_time(self.start_time_combo, start_time)
                     end_time = start_time.addSecs(duration_minutes * 60)
                     self.set_combo_to_time(self.end_time_combo, end_time)
             finally:
@@ -200,6 +211,8 @@ class RecurrenceDialog(QDialog):
                 start_time = self.get_time_from_combo(self.start_time_combo)
                 end_time = self.get_time_from_combo(self.end_time_combo)
                 if start_time and end_time:
+                    # 重新格式化結束時間顯示，確保上午/下午格式正確
+                    self.set_combo_to_time(self.end_time_combo, end_time)
                     duration_seconds = start_time.secsTo(end_time)
                     if duration_seconds < 0:
                         duration_seconds += 24 * 3600  # 跨日
@@ -247,9 +260,16 @@ class RecurrenceDialog(QDialog):
                 if item_time == time:
                     combo.setCurrentIndex(i)
                     return
-            # 如果沒有找到，設置為自訂文本
-            time_str = time.toString("hh:mm")
-            combo.setCurrentText(time_str)
+            
+            # 如果沒有找到，設置為自訂文本，包含上午/下午
+            hour = time.hour()
+            minute = time.minute()
+            time_str = "上午" if hour < 12 else "下午"
+            display_hour = hour % 12
+            if display_hour == 0:
+                display_hour = 12
+            time_text = f"{time_str} {display_hour:02d}:{minute:02d}"
+            combo.setCurrentText(time_text)
         finally:
             combo.blockSignals(False)
 
@@ -305,7 +325,7 @@ class RecurrenceDialog(QDialog):
         self.freq_button_group = QButtonGroup(self)
 
         self.radio_daily = QRadioButton("每天(D)")
-        self.radio_daily.setChecked(True)
+        self.radio_daily.setChecked(True)  # 預設改為每天
         self.freq_button_group.addButton(self.radio_daily)
         left_layout.addWidget(self.radio_daily)
 
@@ -349,7 +369,7 @@ class RecurrenceDialog(QDialog):
         """建立每天選項的詳細設定"""
         self.daily_widget = QWidget()
         layout = QHBoxLayout(self.daily_widget)
-        layout.setSpacing(5)
+        layout.setSpacing(8)  # 增加間距
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.radio_daily_every = QRadioButton("每(V)")
@@ -363,7 +383,11 @@ class RecurrenceDialog(QDialog):
         self.daily_interval.setFixedWidth(50)
         layout.addWidget(self.daily_interval)
 
-        layout.addWidget(QLabel("天"))
+        # 為"天"標籤設置最小寬度，確保可見
+        day_label = QLabel("天")
+        day_label.setMinimumWidth(20)
+        layout.addWidget(day_label)
+
         layout.addStretch()
 
         self.daily_weekday_radio = QRadioButton("每個工作日(K)")
@@ -479,14 +503,14 @@ class RecurrenceDialog(QDialog):
         self.monthly_week_num.addItems(
             ["第 1 個", "第 2 個", "第 3 個", "第 4 個", "最後 1 個"]
         )
-        self.monthly_week_num.setFixedWidth(80)
+        self.monthly_week_num.setFixedWidth(100)
         week_layout.addWidget(self.monthly_week_num)
 
         self.monthly_week_day = QComboBox()
         self.monthly_week_day.addItems(
-            ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]
+            ["週一到週五", "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]
         )
-        self.monthly_week_day.setFixedWidth(80)
+        self.monthly_week_day.setFixedWidth(100)
         week_layout.addWidget(self.monthly_week_day)
 
         week_layout.addStretch()
@@ -591,14 +615,14 @@ class RecurrenceDialog(QDialog):
         self.yearly_week_num.addItems(
             ["第 1 個", "第 2 個", "第 3 個", "第 4 個", "最後 1 個"]
         )
-        self.yearly_week_num.setFixedWidth(80)
+        self.yearly_week_num.setFixedWidth(100)
         week_layout.addWidget(self.yearly_week_num)
 
         self.yearly_week_day = QComboBox()
         self.yearly_week_day.addItems(
-            ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]
+            ["週一到週五", "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]
         )
-        self.yearly_week_day.setFixedWidth(80)
+        self.yearly_week_day.setFixedWidth(100)
         week_layout.addWidget(self.yearly_week_day)
 
         week_layout.addStretch()
@@ -621,6 +645,7 @@ class RecurrenceDialog(QDialog):
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setDisplayFormat("yyyy/M/d (ddd)")
         self.start_date_edit.setDate(QDate.currentDate())
+        self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setFixedWidth(150)
         layout.addWidget(self.start_date_edit, 0, 1)
 
@@ -629,13 +654,13 @@ class RecurrenceDialog(QDialog):
 
         # 結束於日期
         self.radio_end_by = QRadioButton("結束於(B):")
-        self.radio_end_by.setChecked(True)
         self.end_button_group.addButton(self.radio_end_by)
         layout.addWidget(self.radio_end_by, 0, 2)
 
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setDisplayFormat("yyyy/M/d (ddd)")
         self.end_date_edit.setDate(QDate.currentDate().addMonths(3))
+        self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setFixedWidth(150)
         layout.addWidget(self.end_date_edit, 0, 3)
 
@@ -663,6 +688,7 @@ class RecurrenceDialog(QDialog):
 
         # 沒有結束日期
         self.radio_end_never = QRadioButton("沒有結束日期(O)")
+        self.radio_end_never.setChecked(True)  # 預設改為沒有結束日期
         self.end_button_group.addButton(self.radio_end_never)
         layout.addWidget(self.radio_end_never, 2, 2, 1, 2)
 
@@ -702,6 +728,25 @@ class RecurrenceDialog(QDialog):
         self.weekly_widget.setVisible(self.radio_weekly.isChecked())
         self.monthly_widget.setVisible(self.radio_monthly.isChecked())
         self.yearly_widget.setVisible(self.radio_yearly.isChecked())
+
+    def on_end_condition_changed(self, button, checked):
+        """結束條件變更時啟用/禁用相關控制項"""
+        if not checked:
+            return
+
+        # 根據選擇的結束條件啟用/禁用控制項
+        if button == self.radio_end_never:
+            # 沒有結束日期：禁用所有結束條件控制項
+            self.end_date_edit.setEnabled(False)
+            self.end_count.setEnabled(False)
+        elif button == self.radio_end_by:
+            # 結束於日期：只啟用日期選擇器
+            self.end_date_edit.setEnabled(True)
+            self.end_count.setEnabled(False)
+        elif button == self.radio_end_after:
+            # 重複次數：只啟用次數輸入框
+            self.end_date_edit.setEnabled(False)
+            self.end_count.setEnabled(True)
 
     def on_duration_changed(self, index):
         """期間變更時更新結束時間"""
@@ -785,8 +830,13 @@ class RecurrenceDialog(QDialog):
                 week_num = self.monthly_week_num.currentIndex() + 1
                 if self.monthly_week_num.currentIndex() == 4:  # 最後一個
                     week_num = -1
-                day_map = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"]
-                byday = day_map[self.monthly_week_day.currentIndex()]
+                
+                day_index = self.monthly_week_day.currentIndex()
+                if day_index == 0:  # 週一到週五
+                    byday = "MO,TU,WE,TH,FR"
+                else:
+                    day_map = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"]
+                    byday = day_map[day_index - 1]  # 減1因為第一個選項是週一到週五
                 bysetpos = str(week_num)
 
         elif self.radio_yearly.isChecked():
@@ -801,8 +851,13 @@ class RecurrenceDialog(QDialog):
                 week_num = self.yearly_week_num.currentIndex() + 1
                 if self.yearly_week_num.currentIndex() == 4:  # 最後一個
                     week_num = -1
-                day_map = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"]
-                byday = day_map[self.yearly_week_day.currentIndex()]
+                
+                day_index = self.yearly_week_day.currentIndex()
+                if day_index == 0:  # 週一到週五
+                    byday = "MO,TU,WE,TH,FR"
+                else:
+                    day_map = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"]
+                    byday = day_map[day_index - 1]  # 減1因為第一個選項是週一到週五
                 bysetpos = str(week_num)
 
         # 結束條件
@@ -926,6 +981,11 @@ class RecurrenceDialog(QDialog):
             # 設定期間
             self.set_duration_to_minutes(duration_minutes)
 
+            # 檢查結束條件：如果沒有 COUNT 或 UNTIL，則設定為沒有結束日期
+            has_end_condition = any(part.startswith("COUNT=") or part.startswith("UNTIL=") for part in parts)
+            if not has_end_condition:
+                self.radio_end_never.setChecked(True)
+
             # 設定頻率和詳細選項
             if freq == "DAILY":
                 self.radio_daily.setChecked(True)
@@ -957,17 +1017,21 @@ class RecurrenceDialog(QDialog):
                         self.monthly_week_num.setCurrentIndex(4)
                     else:
                         self.monthly_week_num.setCurrentIndex(min(setpos - 1, 4))
-                    day_map = {
-                        "SU": 0,
-                        "MO": 1,
-                        "TU": 2,
-                        "WE": 3,
-                        "TH": 4,
-                        "FR": 5,
-                        "SA": 6,
-                    }
-                    if byday in day_map:
-                        self.monthly_week_day.setCurrentIndex(day_map[byday])
+                    
+                    if byday == "MO,TU,WE,TH,FR":
+                        self.monthly_week_day.setCurrentIndex(0)  # 週一到週五
+                    else:
+                        day_map = {
+                            "SU": 1,
+                            "MO": 2,
+                            "TU": 3,
+                            "WE": 4,
+                            "TH": 5,
+                            "FR": 6,
+                            "SA": 7,
+                        }
+                        if byday in day_map:
+                            self.monthly_week_day.setCurrentIndex(day_map[byday])
 
             elif freq == "YEARLY":
                 self.radio_yearly.setChecked(True)
@@ -986,17 +1050,20 @@ class RecurrenceDialog(QDialog):
                         self.yearly_week_num.setCurrentIndex(4)
                     else:
                         self.yearly_week_num.setCurrentIndex(min(setpos - 1, 4))
-                    day_map = {
-                        "SU": 0,
-                        "MO": 1,
-                        "TU": 2,
-                        "WE": 3,
-                        "TH": 4,
-                        "FR": 5,
-                        "SA": 6,
-                    }
-                    if byday in day_map:
-                        self.yearly_week_day.setCurrentIndex(day_map[byday])
+                    if byday == "MO,TU,WE,TH,FR":
+                        self.yearly_week_day.setCurrentIndex(0)  # 週一到週五
+                    else:
+                        day_map = {
+                            "SU": 1,
+                            "MO": 2,
+                            "TU": 3,
+                            "WE": 4,
+                            "TH": 5,
+                            "FR": 6,
+                            "SA": 7,
+                        }
+                        if byday in day_map:
+                            self.yearly_week_day.setCurrentIndex(day_map[byday])
 
         except Exception as e:
             print(f"解析現有 RRULE 失敗: {e}")
@@ -1115,6 +1182,19 @@ class RecurrenceDialog(QDialog):
                 QComboBox#startTimeCombo QListView::item, QComboBox#endTimeCombo QListView::item {
                     color: white;
                 }
+                QCalendarWidget QWidget {
+                    background-color: #2b2b2b;
+                    color: #cccccc;
+                }
+                QCalendarWidget QAbstractItemView:enabled {
+                    background-color: #363636;
+                    color: #cccccc;
+                    selection-background-color: #0e639c;
+                    selection-color: white;
+                }
+                QCalendarWidget QAbstractItemView:disabled {
+                    color: #666666;
+                }
                 QLabel {
                     color: #cccccc;
                 }
@@ -1213,6 +1293,19 @@ class RecurrenceDialog(QDialog):
                 QComboBox::item:selected {
                     background-color: #0078d4;
                     color: white;
+                }
+                QCalendarWidget QWidget {
+                    background-color: #f5f5f5;
+                    color: #333;
+                }
+                QCalendarWidget QAbstractItemView:enabled {
+                    background-color: white;
+                    color: #333;
+                    selection-background-color: #0078d4;
+                    selection-color: white;
+                }
+                QCalendarWidget QAbstractItemView:disabled {
+                    color: #cccccc;
                 }
                 QLabel {
                     color: #333;

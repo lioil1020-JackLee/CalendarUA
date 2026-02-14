@@ -26,7 +26,7 @@ class RRuleParser:
             Optional[rrule]: rrule 物件，解析失敗回傳 None
         """
         try:
-            # 從 RRULE 字串中提取 DTSTART
+            # 從 RRULE 字串中提取 DTSTART 和過濾不支援的參數
             dtstart_str = None
             if "DTSTART:" in rrule_str:
                 parts = rrule_str.split(";")
@@ -34,6 +34,9 @@ class RRuleParser:
                 for part in parts:
                     if part.startswith("DTSTART:"):
                         dtstart_str = part.split(":", 1)[1]
+                    elif part.startswith("DURATION="):
+                        # 忽略 DURATION 參數，因為 dateutil.rrule 不支援
+                        continue
                     else:
                         rrule_parts.append(part)
                 rrule_str = ";".join(rrule_parts)
