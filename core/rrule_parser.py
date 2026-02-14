@@ -4,7 +4,7 @@ from dateutil.rrule import rrulestr, rrule
 from dateutil.parser import parse
 import logging
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 

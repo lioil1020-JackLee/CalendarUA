@@ -13,7 +13,7 @@ from contextlib import contextmanager
 
 # 設定日誌記錄
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.WARNING, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ class SQLiteManager:
             opc_url TEXT NOT NULL,
             node_id TEXT NOT NULL,
             target_value TEXT NOT NULL,
+            data_type TEXT DEFAULT 'auto',
             rrule_str TEXT NOT NULL,
             opc_security_policy TEXT DEFAULT 'None',
             opc_security_mode TEXT DEFAULT 'None',
@@ -83,6 +84,8 @@ class SQLiteManager:
             opc_password TEXT DEFAULT '',
             opc_timeout INTEGER DEFAULT 10,
             is_enabled INTEGER DEFAULT 1,
+            last_execution_status TEXT DEFAULT '',
+            last_execution_time TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -93,6 +96,18 @@ class SQLiteManager:
                 cursor = conn.cursor()
                 # 建立表格
                 cursor.execute(create_table_sql)
+
+                # 檢查並添加缺少的欄位
+                cursor.execute("PRAGMA table_info(schedules)")
+                columns = [column[1] for column in cursor.fetchall()]
+                
+                if 'last_execution_status' not in columns:
+                    cursor.execute("ALTER TABLE schedules ADD COLUMN last_execution_status TEXT DEFAULT ''")
+                    logger.info("已添加 last_execution_status 欄位")
+                
+                if 'last_execution_time' not in columns:
+                    cursor.execute("ALTER TABLE schedules ADD COLUMN last_execution_time TIMESTAMP")
+                    logger.info("已添加 last_execution_time 欄位")
 
                 # 建立索引以提升查詢效能
                 cursor.execute(
@@ -158,6 +173,24 @@ class SQLiteManager:
                     )
                     logger.info("已添加 opc_timeout 欄位")
                 
+                if "last_execution_status" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN last_execution_status TEXT DEFAULT '尚未執行'"
+                    )
+                    logger.info("已添加 last_execution_status 欄位")
+                
+                if "last_execution_time" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN last_execution_time TIMESTAMP"
+                    )
+                    logger.info("已添加 last_execution_time 欄位")
+                
+                if "next_execution_time" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN next_execution_time TIMESTAMP"
+                    )
+                    logger.info("已添加 next_execution_time 欄位")
+                
                 conn.commit()
                 
         except sqlite3.Error as e:
@@ -170,6 +203,7 @@ class SQLiteManager:
         node_id: str,
         target_value: str,
         rrule_str: str,
+        data_type: str = "auto",
         opc_security_policy: str = "None",
         opc_security_mode: str = "None",
         opc_username: str = "",
@@ -186,6 +220,7 @@ class SQLiteManager:
             node_id: OPC UA Tag NodeID
             target_value: 要寫入的數值
             rrule_str: RRULE 規則字串
+            data_type: 資料型別 (auto/int/float/string/bool)
             opc_security_policy: OPC安全策略
             opc_security_mode: OPC安全模式 (None/Sign/SignAndEncrypt)
             opc_username: OPC使用者名稱
@@ -197,9 +232,9 @@ class SQLiteManager:
             Optional[int]: 新增排程的 ID，失敗時回傳 None
         """
         insert_sql = """
-        INSERT INTO schedules (task_name, opc_url, node_id, target_value, rrule_str,
+        INSERT INTO schedules (task_name, opc_url, node_id, target_value, data_type, rrule_str,
                               opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, is_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         try:
@@ -207,7 +242,7 @@ class SQLiteManager:
                 cursor = conn.cursor()
                 cursor.execute(
                     insert_sql,
-                    (task_name, opc_url, node_id, target_value, rrule_str,
+                    (task_name, opc_url, node_id, target_value, data_type, rrule_str,
                      opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, is_enabled),
                 )
                 conn.commit()
@@ -292,6 +327,7 @@ class SQLiteManager:
         node_id: str,
         target_value: str,
         rrule_str: str,
+        data_type: str = "auto",
         opc_security_policy: str = "None",
         opc_security_mode: str = "None",
         opc_username: str = "",
@@ -323,6 +359,7 @@ class SQLiteManager:
             opc_url=opc_url,
             node_id=node_id,
             target_value=target_value,
+            data_type=data_type,
             rrule_str=rrule_str,
             opc_security_policy=opc_security_policy,
             opc_security_mode=opc_security_mode,
@@ -376,6 +413,7 @@ class SQLiteManager:
             "opc_url",
             "node_id",
             "target_value",
+            "data_type",
             "rrule_str",
             "opc_security_policy",
             "opc_security_mode",
@@ -383,6 +421,8 @@ class SQLiteManager:
             "opc_password",
             "opc_timeout",
             "is_enabled",
+            "last_execution_status",
+            "last_execution_time",
         }
 
         # 過濾出有效的更新欄位
@@ -427,6 +467,24 @@ class SQLiteManager:
         """
         return self.update_schedule(schedule_id, is_enabled=is_enabled)
 
+    def update_execution_status(self, schedule_id: int, status: str) -> bool:
+        """
+        更新排程的執行狀態
+
+        Args:
+            schedule_id: 排程 ID
+            status: 執行狀態描述
+
+        Returns:
+            bool: 更新成功回傳 True，否則回傳 False
+        """
+        from datetime import datetime
+        return self.update_schedule(
+            schedule_id,
+            last_execution_status=status,
+            last_execution_time=datetime.now()
+        )
+
     def clear_all_schedules(self) -> bool:
         """
         清除所有排程資料
@@ -447,3 +505,46 @@ class SQLiteManager:
         except sqlite3.Error as e:
             logger.error(f"清除排程資料失敗: {e}")
             return False
+
+    def get_next_task_name(self) -> str:
+        """
+        獲取下一個預設任務名稱（任務1、任務2、任務3...）
+
+        Returns:
+            str: 下一個可用的任務名稱
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 查詢所有以"任務"開頭的任務名稱
+                cursor.execute("SELECT task_name FROM schedules WHERE task_name LIKE '任務%'")
+                existing_names = cursor.fetchall()
+                
+                # 提取數字部分
+                numbers = []
+                for (name,) in existing_names:
+                    if name.startswith('任務') and len(name) > 2:
+                        try:
+                            num = int(name[2:])  # 去掉"任務"取數字
+                            numbers.append(num)
+                        except ValueError:
+                            continue
+                
+                # 找出下一個可用的數字
+                next_num = 1
+                if numbers:
+                    numbers.sort()
+                    # 找到第一個缺失的數字
+                    for i, num in enumerate(numbers, 1):
+                        if num != i:
+                            next_num = i
+                            break
+                    else:
+                        next_num = len(numbers) + 1
+                
+                return f"任務{next_num}"
+
+        except sqlite3.Error as e:
+            logger.error(f"獲取下一個任務名稱失敗: {e}")
+            return "任務1"

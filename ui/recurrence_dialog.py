@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QPushButton,
     QDateEdit,
-    QTimeEdit,
     QGroupBox,
     QRadioButton,
     QButtonGroup,
@@ -49,6 +48,10 @@ class RecurrenceDialog(QDialog):
 
         # 初始化頻率選擇的顯示狀態
         self.on_frequency_changed()
+
+        # 解析現有的 RRULE（如果有的話）
+        if self.current_rrule:
+            self.parse_existing_rrule()
 
         # 初始化時間同步：確保結束時間根據期間正確計算
         self.on_start_time_changed(None)
@@ -148,30 +151,56 @@ class RecurrenceDialog(QDialog):
             self.duration_combo.addItem(text, minutes)
         self.duration_combo.setCurrentIndex(1)  # 預設改為 5 分
 
-    def populate_time_combo(self, combo: QComboBox):
+    def populate_time_combo(self, combo: QComboBox, default_time: QTime = None):
         """填充時間下拉選單"""
         combo.clear()
-        # 生成從上午 12:00 (00:00) 到下午 11:30 (23:30) 的選項，每 30 分鐘一個
+        # 生成從上午 12:00:00 (00:00:00) 到下午 11:30:00 (23:30:00) 的選項，每30分鐘一個
         for hour in range(24):
-            for minute in [0, 30]:
+            for minute in range(0, 60, 30):  # 每30分鐘
                 time_str = "上午" if hour < 12 else "下午"
                 display_hour = hour % 12
                 if display_hour == 0:
                     display_hour = 12
-                time_text = f"{time_str} {display_hour:02d}:{minute:02d}"
-                combo.addItem(time_text, QTime(hour, minute))
+                time_text = f"{time_str} {display_hour:02d}:{minute:02d}:00"
+                combo.addItem(time_text, QTime(hour, minute, 0))
 
-        # 設置預設值為離目前系統時間最接近的，但要大於目前系統時間
-        current_time = QTime.currentTime()
-        best_i = -1
-        best_time = None
-        for i in range(combo.count()):
-            time = combo.itemData(i)
-            if time > current_time and (best_time is None or time < best_time):
-                best_time = time
-                best_i = i
-        if best_i >= 0:
-            combo.setCurrentIndex(best_i)
+        # 如果提供了預設時間，使用它；否則設置為離目前系統時間最接近的
+        if default_time is not None:
+            # 首先嘗試找到完全匹配的時間選項
+            exact_match_i = -1
+            for i in range(combo.count()):
+                time = combo.itemData(i)
+                if time.hour() == default_time.hour() and time.minute() == default_time.minute():
+                    exact_match_i = i
+                    break
+            
+            if exact_match_i >= 0:
+                # 找到完全匹配，設置為該項目
+                combo.setCurrentIndex(exact_match_i)
+            else:
+                # 沒有完全匹配，格式化時間並設置為可編輯文字
+                time_str = "上午" if default_time.hour() < 12 else "下午"
+                display_hour = default_time.hour() % 12
+                if display_hour == 0:
+                    display_hour = 12
+                time_text = f"{time_str} {display_hour:02d}:{default_time.minute():02d}:00"
+                combo.setCurrentText(time_text)
+        elif not self.current_rrule:
+            # 只有在沒有現有 RRULE 時才設置預設值為離目前系統時間最接近的，但要大於目前系統時間
+            current_time = QTime.currentTime()
+            best_i = -1
+            best_time = None
+            for i in range(combo.count()):
+                time = combo.itemData(i)
+                if time > current_time and (best_time is None or time < best_time):
+                    best_time = time
+                    best_i = i
+            if best_i >= 0:
+                combo.setCurrentIndex(best_i)
+            else:
+                # 如果沒有找到合適的時間，設置為第一個項目
+                combo.setCurrentIndex(0)
+        # 在編輯模式下，如果沒有提供 default_time，不設置任何預設值
 
     def connect_signals(self):
         """連接信號"""
@@ -194,6 +223,150 @@ class RecurrenceDialog(QDialog):
 
         # 結束條件變更
         self.end_button_group.buttonToggled.connect(self.on_end_condition_changed)
+
+    def parse_existing_rrule(self):
+        """解析現有的 RRULE 字串並設置控制項"""
+        if not self.current_rrule:
+            return
+
+        try:
+            # 解析 RRULE 參數
+            params = {}
+            parts = self.current_rrule.split(";")
+            for part in parts:
+                if "=" in part:
+                    key, value = part.split("=", 1)
+                    params[key] = value
+
+            # 設置頻率
+            freq = params.get("FREQ", "DAILY")
+            if freq == "DAILY":
+                self.radio_daily.setChecked(True)
+            elif freq == "WEEKLY":
+                self.radio_weekly.setChecked(True)
+            elif freq == "MONTHLY":
+                self.radio_monthly.setChecked(True)
+            elif freq == "YEARLY":
+                self.radio_yearly.setChecked(True)
+
+            # 設置間隔
+            interval = int(params.get("INTERVAL", "1"))
+            if freq == "DAILY":
+                self.daily_interval.setValue(interval)
+            elif freq == "WEEKLY":
+                self.weekly_interval.setValue(interval)
+            elif freq == "MONTHLY":
+                self.monthly_interval.setValue(interval)
+            elif freq == "YEARLY":
+                self.yearly_interval.setValue(interval)
+
+            # 設置開始時間
+            byhour = params.get("BYHOUR")
+            byminute = params.get("BYMINUTE", "0")
+            if byhour:
+                hour = int(byhour)
+                minute = int(byminute)
+                start_time = QTime(hour, minute, 0)
+            else:
+                # 如果沒有 BYHOUR，使用預設時間 (上午9:00)
+                start_time = QTime(9, 0, 0)
+            # 重新填充開始時間下拉選單，使用現有時間作為預設值
+            self.populate_time_combo(self.start_time_combo, start_time)
+
+            # 設置結束條件
+            if "COUNT" in params:
+                self.radio_end_after.setChecked(True)
+                self.end_count.setValue(int(params["COUNT"]))
+            elif "UNTIL" in params:
+                self.radio_end_by.setChecked(True)
+                until_str = params["UNTIL"]
+                try:
+                    # 解析 UNTIL 日期 (格式: YYYYMMDD)
+                    year = int(until_str[:4])
+                    month = int(until_str[4:6])
+                    day = int(until_str[6:8])
+                    self.end_date_edit.setDate(QDate(year, month, day))
+                except (ValueError, IndexError):
+                    pass  # 使用預設值
+            else:
+                self.radio_end_never.setChecked(True)
+
+            # 設置頻率特定的參數
+            self._parse_frequency_specific_params(params)
+
+        except Exception as e:
+            print(f"解析 RRULE 失敗: {e}")
+            # 解析失敗時使用預設值
+
+    def _parse_frequency_specific_params(self, params):
+        """解析頻率特定的參數"""
+        freq = params.get("FREQ", "DAILY")
+
+        if freq == "WEEKLY":
+            # 解析星期幾
+            byday = params.get("BYDAY", "")
+            if byday:
+                days = byday.split(",")
+                # 清除所有勾選
+                for checkbox in self.day_checkboxes.values():
+                    checkbox.setChecked(False)
+                # 設置對應的勾選
+                for day in days:
+                    if day in self.day_checkboxes:
+                        self.day_checkboxes[day].setChecked(True)
+
+        elif freq == "MONTHLY":
+            bymonthday = params.get("BYMONTHDAY")
+            byday = params.get("BYDAY")
+            bysetpos = params.get("BYSETPOS")
+
+            if bymonthday:
+                # 每月第幾天
+                self.radio_monthly_day.setChecked(True)
+                self.monthly_day.setValue(int(bymonthday))
+            elif byday and bysetpos:
+                # 每月第幾個星期幾
+                self.radio_monthly_week.setChecked(True)
+                self.monthly_week_interval.setValue(int(bysetpos))
+                # 設置星期幾
+                day_map = {
+                    "MO": "星期一", "TU": "星期二", "WE": "星期三", "TH": "星期四",
+                    "FR": "星期五", "SA": "星期六", "SU": "星期日"
+                }
+                if byday in day_map:
+                    day_text = day_map[byday]
+                    for i in range(self.monthly_week_day.count()):
+                        if day_text in self.monthly_week_day.itemText(i):
+                            self.monthly_week_day.setCurrentIndex(i)
+                            break
+
+        elif freq == "YEARLY":
+            bymonth = params.get("BYMONTH")
+            bymonthday = params.get("BYMONTHDAY")
+            byday = params.get("BYDAY")
+            bysetpos = params.get("BYSETPOS")
+
+            if bymonth and bymonthday:
+                # 每年第幾月第幾天
+                self.radio_yearly_date.setChecked(True)
+                self.yearly_month.setCurrentIndex(int(bymonth) - 1)  # 月份從0開始
+                self.yearly_day.setValue(int(bymonthday))
+            elif bymonth and byday and bysetpos:
+                # 每年第幾月第幾個星期幾
+                self.radio_yearly_week.setChecked(True)
+                self.yearly_week_month.setCurrentIndex(int(bymonth) - 1)
+                self.yearly_week_num.setValue(int(bysetpos))
+                # 設置星期幾
+                day_map = {
+                    "MO": "星期一", "TU": "星期二", "WE": "星期三", "TH": "星期四",
+                    "FR": "星期五", "SA": "星期六", "SU": "星期日"
+                }
+                if byday in day_map:
+                    day_text = day_map[byday]
+                    for i in range(self.yearly_week_day.count()):
+                        if day_text in self.yearly_week_day.itemText(i):
+                            self.yearly_week_day.setCurrentIndex(i)
+                            break
 
     def on_start_time_changed(self, value):
         """開始時間改變時更新結束時間"""
@@ -235,23 +408,35 @@ class RecurrenceDialog(QDialog):
             # 自訂時間格式 或 標準格式
             parts = text.split()
             if len(parts) >= 2 and (parts[0] == "上午" or parts[0] == "下午"):
-                # 標準格式: "上午 12:00"
+                # 標準格式: "上午 12:00:00"
                 period = parts[0]
                 time_part = parts[-1]
-                hour, minute = map(int, time_part.split(":"))
+                time_parts = time_part.split(":")
+                if len(time_parts) == 3:
+                    # 包含秒數: "12:00:30"
+                    hour, minute, second = map(int, time_parts)
+                else:
+                    # 不包含秒數: "12:00"
+                    hour, minute = map(int, time_parts)
+                    second = 0
                 if period == "上午":
                     if hour == 12:
                         hour = 0
                 elif period == "下午":
                     if hour != 12:
                         hour += 12
-                return QTime(hour, minute)
+                return QTime(hour, minute, second)
             else:
-                # 自訂格式: "12:00"
+                # 自訂格式: "12:00:00" 或 "12:00"
                 time_part = text.split()[-1]
                 try:
-                    hour, minute = map(int, time_part.split(":"))
-                    return QTime(hour, minute)
+                    time_parts = time_part.split(":")
+                    if len(time_parts) == 3:
+                        hour, minute, second = map(int, time_parts)
+                    else:
+                        hour, minute = map(int, time_parts)
+                        second = 0
+                    return QTime(hour, minute, second)
                 except:
                     pass
         # 從項目數據獲取
@@ -268,14 +453,15 @@ class RecurrenceDialog(QDialog):
                     combo.setCurrentIndex(i)
                     return
             
-            # 如果沒有找到，設置為自訂文本，包含上午/下午
+            # 如果沒有找到，設置為自訂文本，包含上午/下午和秒數
             hour = time.hour()
             minute = time.minute()
+            second = time.second()
             time_str = "上午" if hour < 12 else "下午"
             display_hour = hour % 12
             if display_hour == 0:
                 display_hour = 12
-            time_text = f"{time_str} {display_hour:02d}:{minute:02d}"
+            time_text = f"{time_str} {display_hour:02d}:{minute:02d}:{second:02d}"
             combo.setCurrentText(time_text)
         finally:
             combo.blockSignals(False)
@@ -296,25 +482,6 @@ class RecurrenceDialog(QDialog):
             self.duration_combo.setCurrentIndex(best_index)
         finally:
             self.duration_combo.blockSignals(False)
-
-    def is_valid_time_text(self, text: str) -> bool:
-        """檢查文字是否是有效的時間格式"""
-        if not text:
-            return False
-        # 檢查是否包含 ":" 且長度適中
-        if ":" not in text or len(text) < 4:
-            return False
-        # 處理 "上午 hh:mm" 或 "下午 hh:mm" 格式
-        time_part = text.split()[-1]  # 取最後部分，如 "10:00"
-        try:
-            parts = time_part.split(":")
-            if len(parts) == 2:
-                hour = int(parts[0])
-                minute = int(parts[1])
-                return 0 <= hour <= 23 and 0 <= minute <= 59
-        except ValueError:
-            pass
-        return False
 
     def create_recurrence_pattern_group(self) -> QGroupBox:
         """建立循環模式區塊"""
@@ -723,11 +890,6 @@ class RecurrenceDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
         layout.addWidget(self.btn_cancel)
 
-        self.btn_remove = QPushButton("移除循環(R)")
-        self.btn_remove.setFixedWidth(100)
-        self.btn_remove.clicked.connect(self.on_remove_clicked)
-        layout.addWidget(self.btn_remove)
-
         return widget
 
     def on_frequency_changed(self):
@@ -848,11 +1010,6 @@ class RecurrenceDialog(QDialog):
         """確定按點擊"""
         rrule_str = self.build_rrule()
         self.rrule_created.emit(rrule_str)
-        self.accept()
-
-    def on_remove_clicked(self):
-        """移除循環按點擊"""
-        self.rrule_created.emit("")
         self.accept()
 
     def build_rrule(self) -> str:
@@ -985,171 +1142,6 @@ class RecurrenceDialog(QDialog):
         parts.append(duration_str)
 
         return ";".join(parts)
-
-    def parse_existing_rrule(self, rrule_str: str):
-        """解析現有的 RRULE 字串"""
-        try:
-            import re
-
-            parts = rrule_str.split(";")
-            freq = ""
-            interval = 1
-            byday = ""
-            bymonthday = ""
-            bymonth = ""
-            bysetpos = ""
-            byhour = 9
-            byminute = 0
-            duration_minutes = 30
-
-            # 解析 DTSTART
-            dtstart_match = re.search(
-                r"DTSTART:(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})", rrule_str
-            )
-            if dtstart_match:
-                year, month, day = (
-                    int(dtstart_match.group(1)),
-                    int(dtstart_match.group(2)),
-                    int(dtstart_match.group(3)),
-                )
-                hour, minute = int(dtstart_match.group(4)), int(dtstart_match.group(5))
-                self.start_date_edit.setDate(QDate(year, month, day))
-                self.set_combo_to_time(self.start_time_combo, QTime(hour, minute))
-                byhour = hour
-                byminute = minute
-
-            # 解析各個部分
-            for part in parts:
-                if part.startswith("FREQ="):
-                    freq = part.split("=")[1]
-                elif part.startswith("INTERVAL="):
-                    interval = int(part.split("=")[1])
-                elif part.startswith("BYDAY="):
-                    byday = part.split("=")[1]
-                elif part.startswith("BYMONTHDAY="):
-                    bymonthday = part.split("=")[1]
-                elif part.startswith("BYMONTH="):
-                    bymonth = part.split("=")[1]
-                elif part.startswith("BYSETPOS="):
-                    bysetpos = part.split("=")[1]
-                elif part.startswith("BYHOUR="):
-                    byhour = int(part.split("=")[1])
-                elif part.startswith("BYMINUTE="):
-                    byminute = int(part.split("=")[1])
-                elif part.startswith("DURATION="):
-                    duration_str = part.split("=")[1]
-                    match = re.search(r"PT(\d+)M", duration_str)
-                    if match:
-                        duration_minutes = int(match.group(1))
-                elif part.startswith("COUNT="):
-                    count = int(part.split("=")[1])
-                    self.radio_end_after.setChecked(True)
-                    self.end_count.setValue(count)
-                elif part.startswith("UNTIL="):
-                    until_str = part.split("=")[1][:8]
-                    year, month, day = (
-                        int(until_str[:4]),
-                        int(until_str[4:6]),
-                        int(until_str[6:8]),
-                    )
-                    self.radio_end_by.setChecked(True)
-                    self.end_date_edit.setDate(QDate(year, month, day))
-
-            # 設定時間
-            start_time = QTime(byhour, byminute)
-            self.set_combo_to_time(self.start_time_combo, start_time)
-            # 設定結束時間為開始時間加期間
-            end_time = start_time.addSecs(duration_minutes * 60)
-            self.set_combo_to_time(self.end_time_combo, end_time)
-            # 設定期間
-            self.set_duration_to_minutes(duration_minutes)
-
-            # 檢查結束條件：如果沒有 COUNT 或 UNTIL，則設定為沒有結束日期
-            has_end_condition = any(part.startswith("COUNT=") or part.startswith("UNTIL=") for part in parts)
-            if not has_end_condition:
-                self.radio_end_never.setChecked(True)
-
-            # 設定頻率和詳細選項
-            if freq == "DAILY":
-                self.radio_daily.setChecked(True)
-                if byday == "MO,TU,WE,TH,FR":
-                    self.daily_weekday_radio.setChecked(True)
-                else:
-                    self.radio_daily_every.setChecked(True)
-                    self.daily_interval.setValue(interval)
-
-            elif freq == "WEEKLY":
-                self.radio_weekly.setChecked(True)
-                self.weekly_interval.setValue(interval)
-                if byday:
-                    for day_code in byday.split(","):
-                        if day_code in self.day_checkboxes:
-                            self.day_checkboxes[day_code].setChecked(True)
-
-            elif freq == "MONTHLY":
-                self.radio_monthly.setChecked(True)
-                if bymonthday:
-                    self.radio_monthly_day.setChecked(True)
-                    self.monthly_interval.setValue(interval)
-                    self.monthly_day.setValue(int(bymonthday))
-                elif bysetpos and byday:
-                    self.radio_monthly_week.setChecked(True)
-                    self.monthly_week_interval.setValue(interval)
-                    setpos = int(bysetpos)
-                    if setpos == -1:
-                        self.monthly_week_num.setCurrentIndex(4)
-                    else:
-                        self.monthly_week_num.setCurrentIndex(min(setpos - 1, 4))
-                    
-                    if byday == "MO,TU,WE,TH,FR":
-                        self.monthly_week_day.setCurrentIndex(0)  # 週一到週五
-                    else:
-                        day_map = {
-                            "SU": 1,
-                            "MO": 2,
-                            "TU": 3,
-                            "WE": 4,
-                            "TH": 5,
-                            "FR": 6,
-                            "SA": 7,
-                        }
-                        if byday in day_map:
-                            self.monthly_week_day.setCurrentIndex(day_map[byday])
-
-            elif freq == "YEARLY":
-                self.radio_yearly.setChecked(True)
-                self.yearly_interval.setValue(interval)
-                if bymonthday:
-                    self.radio_yearly_date.setChecked(True)
-                    if bymonth:
-                        self.yearly_month.setCurrentIndex(int(bymonth) - 1)
-                    self.yearly_day.setValue(int(bymonthday))
-                elif bysetpos and byday and bymonth:
-                    self.radio_yearly_week.setChecked(True)
-                    if bymonth:
-                        self.yearly_week_month.setCurrentIndex(int(bymonth) - 1)
-                    setpos = int(bysetpos)
-                    if setpos == -1:
-                        self.yearly_week_num.setCurrentIndex(4)
-                    else:
-                        self.yearly_week_num.setCurrentIndex(min(setpos - 1, 4))
-                    if byday == "MO,TU,WE,TH,FR":
-                        self.yearly_week_day.setCurrentIndex(0)  # 週一到週五
-                    else:
-                        day_map = {
-                            "SU": 1,
-                            "MO": 2,
-                            "TU": 3,
-                            "WE": 4,
-                            "TH": 5,
-                            "FR": 6,
-                            "SA": 7,
-                        }
-                        if byday in day_map:
-                            self.yearly_week_day.setCurrentIndex(day_map[byday])
-
-        except Exception as e:
-            print(f"解析現有 RRULE 失敗: {e}")
 
     def is_dark_mode(self) -> bool:
         """檢查是否使用暗色模式"""

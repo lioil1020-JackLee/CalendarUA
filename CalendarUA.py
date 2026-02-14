@@ -8,6 +8,13 @@ import sys
 import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
+import logging
+
+# 設定統一的日誌記錄級別
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,7 +49,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread
-from PySide6.QtGui import QAction, QIcon, QColor, QFont
+from PySide6.QtGui import QAction, QColor
 import qasync
 import re
 
@@ -58,7 +65,7 @@ class SchedulerWorker(QThread):
 
     trigger_task = Signal(dict)
 
-    def __init__(self, db_manager: SQLiteManager, check_interval: int = 30):
+    def __init__(self, db_manager: SQLiteManager, check_interval: int = 1):
         super().__init__()
         self.db_manager = db_manager
         self.check_interval = check_interval
@@ -114,9 +121,11 @@ class CalendarUA(QMainWindow):
         super().__init__()
 
         self.db_manager: Optional[SQLiteManager] = None
-        self.opc_handler: Optional[OPCHandler] = None
         self.scheduler_worker: Optional[SchedulerWorker] = None
         self.schedules: List[Dict[str, Any]] = []
+        
+        # 執行計數器：schedule_id -> 已執行次數
+        self.execution_counts: Dict[int, int] = {}
 
         # 主題模式: "light", "dark", "system"
         self.current_theme = "system"
@@ -255,13 +264,12 @@ class CalendarUA(QMainWindow):
 
         # 排程表格
         self.schedule_table = QTableWidget()
-        self.schedule_table.setColumnCount(7)
+        self.schedule_table.setColumnCount(8)
         self.schedule_table.setHorizontalHeaderLabels(
-            ["ID", "任務名稱", "OPC URL", "Node ID", "目標值", "週期規則", "啟用"]
+            ["ID", "任務名稱", "啟用", "上次執行", "下次執行", "週期規則", "節點名稱", "目標修改"]
         )
 
-        # 設定表格樣式
-        self.schedule_table.horizontalHeader().setStretchLastSection(True)
+        # 設定表格樣式 - 自適應寬度
         self.schedule_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeToContents
         )
@@ -276,20 +284,14 @@ class CalendarUA(QMainWindow):
 
         layout.addWidget(self.schedule_table)
 
-        # 連線狀態面板
-        status_group = QGroupBox("連線狀態")
+        # 連線狀態面板（僅顯示資料庫狀態）
+        status_group = QGroupBox("系統狀態")
         status_layout = QHBoxLayout(status_group)
 
         self.db_status_label = QLabel("資料庫: 未連線")
-        self.opc_status_label = QLabel("OPC UA: 未連線")
 
         status_layout.addWidget(self.db_status_label)
-        status_layout.addWidget(self.opc_status_label)
         status_layout.addStretch()
-
-        self.btn_connect_opc = QPushButton("連線 OPC")
-        self.btn_connect_opc.clicked.connect(self.connect_opc)
-        status_layout.addWidget(self.btn_connect_opc)
 
         layout.addWidget(status_group)
 
@@ -838,6 +840,8 @@ class CalendarUA(QMainWindow):
             return
 
         self.schedules = self.db_manager.get_all_schedules()
+        # 重置執行計數器（應用程式重啟時從 0 開始）
+        self.execution_counts = {}
         self.update_schedule_table()
         self.update_daily_summary()
 
@@ -848,29 +852,377 @@ class CalendarUA(QMainWindow):
         self.schedule_table.setRowCount(len(self.schedules))
 
         for row, schedule in enumerate(self.schedules):
-            self.schedule_table.setItem(
-                row, 0, QTableWidgetItem(str(schedule.get("id", "")))
-            )
-            self.schedule_table.setItem(
-                row, 1, QTableWidgetItem(schedule.get("task_name", ""))
-            )
-            self.schedule_table.setItem(
-                row, 2, QTableWidgetItem(schedule.get("opc_url", ""))
-            )
-            self.schedule_table.setItem(
-                row, 3, QTableWidgetItem(schedule.get("node_id", ""))
-            )
-            self.schedule_table.setItem(
-                row, 4, QTableWidgetItem(schedule.get("target_value", ""))
-            )
-            self.schedule_table.setItem(
-                row, 5, QTableWidgetItem(schedule.get("rrule_str", ""))
-            )
+            # ID
+            id_item = QTableWidgetItem(str(schedule.get("id", "")))
+            id_item.setTextAlignment(Qt.AlignCenter)
+            self.schedule_table.setItem(row, 0, id_item)
+            
+            # 任務名稱
+            task_name_item = QTableWidgetItem(schedule.get("task_name", ""))
+            task_name_item.setTextAlignment(Qt.AlignCenter)
+            self.schedule_table.setItem(row, 1, task_name_item)
 
+            # 啟用狀態
             enabled = "✓" if schedule.get("is_enabled") else "✗"
-            item = QTableWidgetItem(enabled)
-            item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 6, item)
+            enabled_item = QTableWidgetItem(enabled)
+            enabled_item.setTextAlignment(Qt.AlignCenter)
+            self.schedule_table.setItem(row, 2, enabled_item)
+
+            # 上次執行時間
+            last_execution_time = schedule.get("last_execution_time")
+            last_execution_status = schedule.get("last_execution_status", "")
+            
+            if last_execution_time:
+                # 格式化時間顯示
+                if isinstance(last_execution_time, str):
+                    try:
+                        dt = datetime.fromisoformat(last_execution_time.replace('Z', '+00:00'))
+                        last_time_str = dt.strftime("%Y/%m/%d %H:%M:%S")
+                    except:
+                        last_time_str = last_execution_time
+                else:
+                    last_time_str = last_execution_time.strftime("%Y/%m/%d %H:%M:%S") if last_execution_time else ""
+                
+                # 如果執行失敗，在時間後面加上(失敗)標記
+                if last_execution_status and ("失敗" in last_execution_status or "錯誤" in last_execution_status):
+                    last_time_str += "(失敗)"
+            else:
+                last_time_str = "尚未執行"
+            
+            last_time_item = QTableWidgetItem(last_time_str)
+            last_time_item.setTextAlignment(Qt.AlignCenter)
+            
+            # 如果是失敗的執行，設定紅色背景
+            if "(失敗)" in last_time_str:
+                last_time_item.setBackground(QColor("#ffebee"))  # 淺紅色
+                last_time_item.setForeground(QColor("#c62828"))  # 深紅色
+            
+            self.schedule_table.setItem(row, 3, last_time_item)
+
+            # 下次執行時間
+            next_execution_time = self._calculate_next_execution_time(schedule)
+            next_time_item = QTableWidgetItem(next_execution_time)
+            next_time_item.setTextAlignment(Qt.AlignCenter)
+            
+            # 如果是過期的排程，設定特殊的顏色
+            if "(已過期)" in next_execution_time:
+                next_time_item.setBackground(QColor("#ffebee"))  # 淺紅色
+                next_time_item.setForeground(QColor("#c62828"))  # 深紅色
+            
+            self.schedule_table.setItem(row, 4, next_time_item)
+
+            # 週期規則 - 轉換為中文簡易說明
+            rrule_str = schedule.get("rrule_str", "")
+            schedule_id = schedule.get("id", 0)
+            schedule_desc = self._format_schedule_description(rrule_str, schedule_id)
+            schedule_item = QTableWidgetItem(schedule_desc)
+            schedule_item.setTextAlignment(Qt.AlignCenter)
+            self.schedule_table.setItem(row, 5, schedule_item)
+
+            # 節點名稱 - 從 node_id 提取最後一部分作為顯示名稱
+            node_id = schedule.get("node_id", "")
+            node_name = self._format_node_name(node_id)
+            node_item = QTableWidgetItem(node_name)
+            node_item.setTextAlignment(Qt.AlignCenter)
+            self.schedule_table.setItem(row, 6, node_item)
+
+            # 目標修改 - 顯示目標值
+            target_value = schedule.get("target_value", "")
+            target_item = QTableWidgetItem(target_value)
+            target_item.setTextAlignment(Qt.AlignCenter)
+            self.schedule_table.setItem(row, 7, target_item)
+
+    def _format_schedule_description(self, rrule_str: str, schedule_id: int = 0) -> str:
+        """將 RRULE 轉換為中文簡易說明"""
+        if not rrule_str:
+            return "未設定"
+
+        try:
+            # 簡單的 RRULE 解析，轉換為中文說明
+            parts = rrule_str.upper().split(';')
+            freq_map = {
+                'DAILY': '每天',
+                'WEEKLY': '每週',
+                'MONTHLY': '每月',
+                'YEARLY': '每年',
+                'HOURLY': '每小時',
+                'MINUTELY': '每分鐘',
+                'SECONDLY': '每秒'
+            }
+            
+            freq = ""
+            interval = 1
+            byday = ""
+            bymonthday = ""
+            byhour = ""
+            byminute = ""
+            bysecond = ""
+            count = ""
+            until = ""
+            bymonth = ""
+            bysetpos = ""
+            
+            for part in parts:
+                if part.startswith('FREQ='):
+                    freq_code = part.split('=')[1]
+                    freq = freq_map.get(freq_code, freq_code)
+                elif part.startswith('INTERVAL='):
+                    interval = int(part.split('=')[1])
+                elif part.startswith('BYDAY='):
+                    byday = part.split('=')[1]
+                elif part.startswith('BYMONTHDAY='):
+                    bymonthday = part.split('=')[1]
+                elif part.startswith('BYHOUR='):
+                    byhour = part.split('=')[1]
+                elif part.startswith('BYMINUTE='):
+                    byminute = part.split('=')[1]
+                elif part.startswith('BYSECOND='):
+                    bysecond = part.split('=')[1]
+                elif part.startswith('COUNT='):
+                    count = part.split('=')[1]
+                elif part.startswith('UNTIL='):
+                    until = part.split('=')[1]
+                elif part.startswith('BYMONTH='):
+                    bymonth = part.split('=')[1]
+                elif part.startswith('BYSETPOS='):
+                    bysetpos = part.split('=')[1]
+            
+            # 如果有 COUNT，計算剩餘次數
+            if count and schedule_id:
+                try:
+                    original_count = int(count)
+                    executed_count = self.execution_counts.get(schedule_id, 0)
+                    remaining_count = max(0, original_count - executed_count)
+                    count = str(remaining_count)
+                except ValueError:
+                    pass  # 如果解析失敗，保持原樣
+            
+            # 生成中文描述
+            desc_parts = []
+            
+            # 頻率部分
+            if interval > 1:
+                desc_parts.append(f"每{interval}{freq[1:]}")  # 每3週
+            else:
+                desc_parts.append(freq)  # 每天
+            
+            # 範圍部分
+            range_desc = ""
+            if bymonth and bymonthday:
+                # X月Y日
+                month_map = {
+                    '1': '一月', '2': '二月', '3': '三月', '4': '四月', '5': '五月', '6': '六月',
+                    '7': '七月', '8': '八月', '9': '九月', '10': '十月', '11': '十一月', '12': '十二月'
+                }
+                month_name = month_map.get(bymonth, f"{bymonth}月")
+                range_desc = f"{month_name}{bymonthday}日"
+            elif bysetpos and byday:
+                # X月的 第Y個 Z
+                if bymonth:
+                    month_map = {
+                        '1': '一月', '2': '二月', '3': '三月', '4': '四月', '5': '五月', '6': '六月',
+                        '7': '七月', '8': '八月', '9': '九月', '10': '十月', '11': '十一月', '12': '十二月'
+                    }
+                    month_name = month_map.get(bymonth, f"{bymonth}月")
+                    pos_map = {'1': '第1個', '2': '第2個', '3': '第3個', '4': '第4個', '5': '第5個', '-1': '最後1個'}
+                    pos = pos_map.get(bysetpos, f'第{bysetpos}個')
+                    day_map = {
+                        'MO': '週一', 'TU': '週二', 'WE': '週三', 'TH': '週四',
+                        'FR': '週五', 'SA': '週六', 'SU': '週日'
+                    }
+                    days = [day_map.get(day, day) for day in byday.split(',')]
+                    range_desc = f"{month_name}的 {pos} {','.join(days)}"
+                else:
+                    # 每月的 第Y個 Z
+                    pos_map = {'1': '第1個', '2': '第2個', '3': '第3個', '4': '第4個', '5': '第5個', '-1': '最後1個'}
+                    pos = pos_map.get(bysetpos, f'第{bysetpos}個')
+                    day_map = {
+                        'MO': '週一', 'TU': '週二', 'WE': '週三', 'TH': '週四',
+                        'FR': '週五', 'SA': '週六', 'SU': '週日'
+                    }
+                    days = [day_map.get(day, day) for day in byday.split(',')]
+                    if len(days) == 5 and set(days) == {'週一', '週二', '週三', '週四', '週五'}:
+                        range_desc = f"{pos} 週一到週五"
+                    else:
+                        range_desc = f"{pos} {','.join(days)}"
+            elif byday:
+                # 星期幾
+                day_map = {
+                    'MO': '一', 'TU': '二', 'WE': '三', 'TH': '四',
+                    'FR': '五', 'SA': '六', 'SU': '日'
+                }
+                days = [day_map.get(day, day) for day in byday.split(',')]
+                if len(days) == 5 and set(days) == {'一', '二', '三', '四', '五'}:
+                    range_desc = "工作天"
+                else:
+                    range_desc = "".join(days)
+            elif bymonthday:
+                range_desc = f"第{bymonthday}天"
+            
+            if range_desc:
+                desc_parts.append(range_desc)
+            
+            # 時間部分
+            time_parts = []
+            if byhour:
+                time_parts.append(byhour)
+            if byminute:
+                time_parts.append(byminute)
+            if bysecond:
+                time_parts.append(bysecond)
+            
+            if time_parts:
+                # 根據頻率和可用參數決定時間顯示格式
+                if byhour:
+                    # 有小時信息，使用完整的時間格式
+                    hour = int(byhour)
+                    minute = int(byminute) if byminute else 0
+                    second = int(bysecond) if bysecond else 0
+                    
+                    if hour < 12:
+                        time_str = f"上午{hour}:{minute:02d}"
+                    elif hour == 12:
+                        time_str = f"中午{hour}:{minute:02d}"
+                    else:
+                        time_str = f"下午{hour-12}:{minute:02d}"
+                    
+                    # 如果有秒數參數，總是顯示秒數
+                    if bysecond is not None:
+                        time_str += f":{second:02d}"
+                else:
+                    # 沒有小時信息，只顯示分鐘和秒鐘
+                    minute = int(byminute) if byminute else 0
+                    second = int(bysecond) if bysecond else 0
+                    
+                    if freq_code in ['MINUTELY', 'SECONDLY']:
+                        # 對於分鐘級或秒級頻率，顯示相對時間
+                        if byminute and bysecond:
+                            time_str = f"第{minute}分第{second}秒"
+                        elif bysecond:
+                            time_str = f"第{second}秒"
+                        else:
+                            time_str = f"第{minute}分"
+                    else:
+                        # 其他情況顯示絕對時間
+                        time_str = f"{minute:02d}:{second:02d}"
+                
+                desc_parts.append(time_str)
+            
+            # 結束條件
+            end_desc = ""
+            if count:
+                end_desc = f"剩餘{count}次之後結束"
+            elif until:
+                # 格式化日期，假設是 YYYYMMDD
+                if len(until) >= 8:
+                    year = until[:4]
+                    month = until[4:6].lstrip('0')  # 移除前導零
+                    day = until[6:8].lstrip('0')    # 移除前導零
+                    end_desc = f"結束於{year}/{month}/{day}"
+            
+            if end_desc:
+                desc_parts.append(end_desc)
+            
+            return " ".join(desc_parts)
+            
+        except Exception:
+            return rrule_str  # 如果解析失敗，返回原始字串
+
+    def _format_node_name(self, node_id: str) -> str:
+        """從 Node ID 提取節點名稱進行顯示"""
+        if not node_id:
+            return ""
+
+        try:
+            # 檢查是否包含 display_name|node_id 格式
+            if "|" in node_id:
+                display_name, actual_node_id = node_id.split("|", 1)
+                return display_name
+            
+            # 處理 OPC UA NodeId 的字串表示
+            if node_id.startswith("NodeId("):
+                # 提取 Identifier 部分
+                import re
+                match = re.search(r"Identifier='([^']+)'", node_id)
+                if match:
+                    return match.group(1)
+            
+            # 特殊處理某些 OPC UA 實現的 Node ID 格式
+            if node_id.startswith("String: "):
+                identifier = node_id[7:]  # 移除 "String: " 前綴
+                # 如果 identifier 是簡單的數字或短字串，嘗試提供更好的名稱
+                if identifier == "3>":
+                    return "Delta_42_1F.HPW1.DT1"
+                return identifier
+            elif node_id.startswith("Numeric: "):
+                identifier = node_id[8:]  # 移除 "Numeric: " 前綴
+                return f"Node_{identifier}"
+            
+            # 如果是標準 OPC UA Node ID 格式，提取最後一部分
+            if node_id.startswith("ns="):
+                # 格式如: ns=2;s=MyVariable 或 ns=2;i=12345
+                parts = node_id.split(";")
+                if len(parts) > 1:
+                    last_part = parts[-1]
+                    if last_part.startswith("s="):
+                        return last_part[2:]  # 移除 "s=" 前綴
+                    elif last_part.startswith("i="):
+                        return f"Node_{last_part[2:]}"  # 數值 ID 轉換為可讀格式
+                    else:
+                        return last_part
+            
+            # 如果不是標準格式，返回最後一個點號之後的部分
+            if "." in node_id:
+                return node_id.split(".")[-1]
+            
+            # 如果都沒有特殊格式，返回原字串
+            return node_id
+            
+        except Exception:
+            return node_id  # 如果處理失敗，返回原始字串
+
+    def _calculate_next_execution_time(self, schedule: Dict[str, Any]) -> str:
+        """計算下次執行時間"""
+        rrule_str = schedule.get("rrule_str", "")
+        if not rrule_str:
+            return "未設定"
+        
+        try:
+            # 使用 RRuleParser 計算下次執行時間
+            next_time = RRuleParser.get_next_trigger(rrule_str)
+            
+            # 檢查 UNTIL 過期
+            parts = rrule_str.upper().split(';')
+            until_expired = False
+            for part in parts:
+                if part.startswith('UNTIL='):
+                    until_value = part.split('=', 1)[1]
+                    if len(until_value) >= 8:
+                        try:
+                            year = int(until_value[:4])
+                            month = int(until_value[4:6])
+                            day = int(until_value[6:8])
+                            until_date = datetime(year, month, day).date()
+                            today = datetime.now().date()
+                            if until_date < today:
+                                until_expired = True
+                        except ValueError:
+                            pass
+                    break
+            
+            if next_time:
+                # 格式化時間顯示
+                time_str = next_time.strftime("%Y/%m/%d %H:%M:%S")
+                return time_str
+            else:
+                # 沒有下次執行時間，檢查是否因為過期
+                if until_expired:
+                    return "已過期"
+                else:
+                    return "已結束"
+                
+        except Exception:
+            return "計算失敗"
 
     def update_daily_summary(self):
         """更新當天排程摘要"""
@@ -894,7 +1246,7 @@ class CalendarUA(QMainWindow):
                 for trigger in triggers:
                     daily_schedules.append(
                         {
-                            "time": trigger.strftime("%H:%M"),
+                            "time": trigger.strftime("%H:%M:%S"),
                             "name": schedule.get("task_name", ""),
                             "value": schedule.get("target_value", ""),
                         }
@@ -923,11 +1275,12 @@ class CalendarUA(QMainWindow):
             data = dialog.get_data()
 
             if self.db_manager:
-                schedule_id = self.db_manager.create_schedule(
+                schedule_id = self.db_manager.add_schedule(
                     task_name=data["task_name"],
                     opc_url=data["opc_url"],
                     node_id=data["node_id"],
                     target_value=data["target_value"],
+                    data_type=data.get("data_type", "auto"),
                     rrule_str=data["rrule_str"],
                     opc_security_policy=data.get("opc_security_policy", "None"),
                     opc_security_mode=data.get("opc_security_mode", "None"),
@@ -962,6 +1315,7 @@ class CalendarUA(QMainWindow):
                     opc_url=data["opc_url"],
                     node_id=data["node_id"],
                     target_value=data["target_value"],
+                    data_type=data.get("data_type", "auto"),
                     rrule_str=data["rrule_str"],
                     opc_security_policy=data.get("opc_security_policy", "None"),
                     opc_security_mode=data.get("opc_security_mode", "None"),
@@ -1057,9 +1411,38 @@ class CalendarUA(QMainWindow):
 
     async def execute_task(self, schedule: Dict[str, Any]):
         """執行排程任務"""
+        schedule_id = schedule.get("id")
         opc_url = schedule.get("opc_url", "")
         node_id = schedule.get("node_id", "")
         target_value = schedule.get("target_value", "")
+        data_type = schedule.get("data_type", "auto")
+
+        # 解析 node_id，提取實際的 OPC UA Node ID
+        import re
+        if "|" in node_id:
+            _, temp = node_id.split("|", 1)
+            actual_node_id = temp
+        else:
+            # 嘗試從 NodeId 字串表示提取
+            match = re.search(r"Identifier='([^']+)'", node_id)
+            if match:
+                identifier = match.group(1)
+                # 從 NodeId 字串提取 namespace 和類型資訊
+                ns_match = re.search(r"NamespaceIndex=(\d+)", node_id)
+                type_match = re.search(r"NodeIdType=<NodeIdType\.(\w+):", node_id)
+                if ns_match and type_match:
+                    ns = ns_match.group(1)
+                    node_type = type_match.group(1)
+                    if node_type == "String":
+                        actual_node_id = f"ns={ns};s={identifier}"
+                    elif node_type == "Numeric":
+                        actual_node_id = f"ns={ns};i={identifier}"
+                    else:
+                        actual_node_id = identifier
+                else:
+                    actual_node_id = identifier
+            else:
+                actual_node_id = node_id
 
         # 取得OPC設定
         security_policy = schedule.get("opc_security_policy", "None")
@@ -1068,6 +1451,13 @@ class CalendarUA(QMainWindow):
         timeout = schedule.get("opc_timeout", 10)
 
         try:
+            # 更新狀態為執行中
+            if self.db_manager:
+                self.db_manager.update_execution_status(schedule_id, "執行中...")
+            
+            # 重新載入表格以顯示狀態更新
+            self.load_schedules()
+
             # 建立OPCHandler並設定安全參數
             handler = OPCHandler(opc_url, timeout=timeout)
 
@@ -1082,50 +1472,87 @@ class CalendarUA(QMainWindow):
 
             async with handler:
                 if handler.is_connected:
-                    success = await handler.write_node(node_id, target_value)
-                    if success:
-                        self.status_bar.showMessage(
-                            f"✓ 已寫入 {node_id} = {target_value}", 5000
-                        )
+                    # 重試機制：最多重試3次，每次間隔5秒
+                    max_retries = 3
+                    retry_delay = 5
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            success = await handler.write_node(actual_node_id, target_value, data_type)
+                            if success:
+                                status_msg = f"✓ 成功寫入 {node_id} = {target_value}"
+                                if self.db_manager:
+                                    self.db_manager.update_execution_status(schedule_id, "執行成功")
+                                    # 增加執行計數器
+                                    self.execution_counts[schedule_id] = self.execution_counts.get(schedule_id, 0) + 1
+                                    # 檢查是否達到 COUNT 上限
+                                    self._check_and_disable_if_count_reached(schedule_id, schedule.get("rrule_str", ""))
+                                break  # 成功後跳出重試循環
+                            else:
+                                if attempt < max_retries - 1:  # 不是最後一次嘗試
+                                    status_msg = f"寫入失敗，正在重試 ({attempt + 1}/{max_retries})..."
+                                    logger.warning(f"寫入失敗，正在等待 {retry_delay} 秒後重試 ({attempt + 1}/{max_retries})")
+                                    await asyncio.sleep(retry_delay)
+                                else:  # 最後一次嘗試失敗
+                                    status_msg = f"✗ 寫入失敗: {node_id} (已重試 {max_retries} 次)"
+                                    if self.db_manager:
+                                        self.db_manager.update_execution_status(schedule_id, f"寫入失敗(重試{max_retries}次)")
+                        except Exception as e:
+                            if attempt < max_retries - 1:  # 不是最後一次嘗試
+                                status_msg = f"執行錯誤，正在重試 ({attempt + 1}/{max_retries})..."
+                                logger.warning(f"寫入錯誤: {e}，正在等待 {retry_delay} 秒後重試 ({attempt + 1}/{max_retries})")
+                                await asyncio.sleep(retry_delay)
+                            else:  # 最後一次嘗試失敗
+                                status_msg = f"✗ 執行錯誤: {str(e)[:50]} (已重試 {max_retries} 次)"
+                                if self.db_manager:
+                                    self.db_manager.update_execution_status(schedule_id, f"執行錯誤(重試{max_retries}次)")
+                                break
                     else:
-                        self.status_bar.showMessage(f"✗ 寫入失敗: {node_id}", 5000)
+                        # 如果所有重試都失敗，這裡不會執行，因為break會跳出
+                        pass
                 else:
-                    self.status_bar.showMessage(f"✗ 無法連線 OPC UA: {opc_url}", 5000)
+                    status_msg = f"✗ 無法連線 OPC UA: {opc_url}"
+                    if self.db_manager:
+                        self.db_manager.update_execution_status(schedule_id, "連線失敗")
+                        
         except Exception as e:
-            self.status_bar.showMessage(f"✗ 執行錯誤: {str(e)}", 5000)
+            status_msg = f"✗ 執行錯誤: {str(e)}"
+            if self.db_manager:
+                self.db_manager.update_execution_status(schedule_id, f"執行錯誤: {str(e)[:50]}")
 
-    async def connect_opc(self):
-        """連線到 OPC UA 伺服器"""
-        # 優先使用選取的排程的 OPC URL，若無則使用第一筆排程的 URL
-        opc_url = None
-        current_row = self.schedule_table.currentRow()
-        if current_row >= 0 and current_row < len(self.schedules):
-            opc_url = self.schedules[current_row].get("opc_url", "")
-        elif self.schedules:
-            opc_url = self.schedules[0].get("opc_url", "")
+        # 更新狀態列和重新載入表格
+        self.status_bar.showMessage(status_msg, 5000)
+        self.load_schedules()
 
-        if not opc_url:
-            QMessageBox.warning(
-                self,
-                "OPC 連線",
-                "請先在排程中設定 OPC URL 或選取一筆含有 OPC URL 的排程。",
-            )
+    def _check_and_disable_if_count_reached(self, schedule_id: int, rrule_str: str):
+        """檢查是否達到 COUNT 上限，如果是則停用排程"""
+        if not rrule_str:
             return
 
-        self.opc_handler = OPCHandler(opc_url)
-
         try:
-            success = await self.opc_handler.connect()
-            if success:
-                self.opc_status_label.setText(f"OPC UA: 已連線 ({opc_url})")
-                self.opc_status_label.setStyleSheet("color: green;")
-            else:
-                self.opc_status_label.setText("OPC UA: 連線失敗")
-                self.opc_status_label.setStyleSheet("color: red;")
+            # 解析 RRULE 中的 COUNT
+            parts = rrule_str.upper().split(';')
+            count_value = None
+            
+            for part in parts:
+                if part.startswith('COUNT='):
+                    try:
+                        count_value = int(part.split('=')[1])
+                        break
+                    except ValueError:
+                        return
+
+            if count_value is not None:
+                executed_count = self.execution_counts.get(schedule_id, 0)
+                if executed_count >= count_value:
+                    # 達到上限，停用排程
+                    if self.db_manager:
+                        self.db_manager.update_schedule(schedule_id, is_enabled=0)
+                        print(f"排程 {schedule_id} 的執行次數已達上限 ({count_value})，已自動停用")
+
         except Exception as e:
-            self.opc_status_label.setText("OPC UA: 連線錯誤")
-            self.opc_status_label.setStyleSheet("color: red;")
-            QMessageBox.critical(self, "OPC 連線錯誤", str(e))
+            # 如果解析失敗，記錄錯誤但不中斷執行
+            print(f"檢查 COUNT 上限失敗: {e}")
 
     def show_db_settings(self):
         """顯示資料庫設定對話框"""
@@ -1147,7 +1574,7 @@ class CalendarUA(QMainWindow):
             self.scheduler_worker.wait()
 
         self.scheduler_worker = SchedulerWorker(self.db_manager)
-        self.scheduler_worker.trigger_task.connect(self.on_schedule_triggered)
+        self.scheduler_worker.trigger_task.connect(self.on_task_triggered)
         self.scheduler_worker.start()
 
     def show_about(self):
@@ -1167,9 +1594,6 @@ class CalendarUA(QMainWindow):
         if self.scheduler_worker:
             self.scheduler_worker.stop()
 
-        if self.opc_handler:
-            asyncio.create_task(self.opc_handler.disconnect())
-
         event.accept()
 
 
@@ -1181,6 +1605,7 @@ class OPCNodeBrowserDialog(QDialog):
         self.opc_url = opc_url
         self.selected_node = ""
         self.opc_handler = None
+        self.logger = logging.getLogger(__name__)
         self.setup_ui()
         self.apply_style()
         # 自動連線並載入節點
@@ -1212,9 +1637,11 @@ class OPCNodeBrowserDialog(QDialog):
 
         # 節點樹狀列表
         self.tree_widget = QTreeWidget()
-        self.tree_widget.setHeaderLabels(["節點名稱", "Node ID", "節點類型"])
+        self.tree_widget.setHeaderLabels(["節點名稱", "Node ID", "節點類型", "資料型別"])
         self.tree_widget.setColumnWidth(0, 200)
         self.tree_widget.setColumnWidth(1, 150)
+        self.tree_widget.setColumnWidth(2, 100)
+        self.tree_widget.setColumnWidth(3, 80)
         self.tree_widget.itemSelectionChanged.connect(self.on_selection_changed)
         self.tree_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         layout.addWidget(self.tree_widget)
@@ -1410,6 +1837,9 @@ class OPCNodeBrowserDialog(QDialog):
                 await self._async_load_child_nodes(objects, root_item, depth=0)
 
             self.status_label.setText("已載入節點")
+            # 確保樹狀元件正確更新
+            self.tree_widget.update()
+            self.tree_widget.repaint()
 
         except Exception as e:
             self.status_label.setText(f"載入節點錯誤: {str(e)}")
@@ -1417,7 +1847,7 @@ class OPCNodeBrowserDialog(QDialog):
 
     async def _async_load_child_nodes(self, parent_node, parent_item, depth=0):
         """異步遞迴載入子節點"""
-        if depth > 2:  # 限制深度避免載入太多
+        if depth > 5:  # 增加深度限制到 5，以載入更深層的節點
             return
 
         try:
@@ -1430,45 +1860,106 @@ class OPCNodeBrowserDialog(QDialog):
 
                     # 取得節點資訊
                     browse_name = await child.read_browse_name()
-                    node_id = str(child.nodeid)
+                    # 正確格式化 Node ID
+                    node_id = child.nodeid.to_string()
                     node_class = await child.read_node_class()
+
+                    # 讀取資料型別和存取權限（僅適用於變數節點）
+                    data_type = "-"
+                    access_level = ""
+                    can_write = False
+                    
+                    if node_class.name == "Variable":
+                        try:
+                            # 讀取資料型別
+                            detected_type = await self.opc_handler.read_node_data_type(node_id)
+                            data_type = detected_type if detected_type else "未知"
+                            self.logger.debug(f"Node {node_id} 資料型別: {data_type}")
+                            
+                            # 讀取存取權限
+                            try:
+                                from asyncua.ua import AttributeIds
+                                access_level_data = await child.read_attribute(AttributeIds.AccessLevel)
+                                # 從 DataValue 中提取實際值
+                                access_level_value = access_level_data.Value.Value if hasattr(access_level_data, 'Value') and access_level_data.Value else None
+                                self.logger.debug(f"Node {node_id} AccessLevel: {access_level_value}")
+                                # 檢查是否有 Write 權限 (0x02)，或者如果無法確定，預設為可寫入
+                                can_write = bool(access_level_value & 0x02) if access_level_value is not None and access_level_value > 0 else True
+                            except Exception as e:
+                                self.logger.debug(f"無法讀取 Node {node_id} 的 AccessLevel: {e}")
+                                # 如果無法讀取AccessLevel，預設為可寫入
+                                can_write = True
+                            
+                            if not can_write:
+                                data_type = "唯讀"
+                                access_level = "唯讀"
+                            
+                        except Exception as e:
+                            self.logger.error(f"讀取 Node {node_id} 資料型別失敗: {e}")
+                            data_type = "未知"
+                            can_write = False
 
                     child_item.setText(0, browse_name.Name)
                     child_item.setText(1, node_id)
                     child_item.setText(2, str(node_class))
+                    child_item.setText(3, data_type)
 
-                    # 儲存節點 ID
+                    # 儲存節點 ID 和資料型別
                     child_item.setData(0, Qt.ItemDataRole.UserRole, node_id)
+                    child_item.setData(0, Qt.ItemDataRole.UserRole + 1, data_type)
+                    child_item.setData(0, Qt.ItemDataRole.UserRole + 2, can_write)
 
                     # 繼續載入子節點
                     await self._async_load_child_nodes(child, child_item, depth + 1)
 
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"載入子節點失敗 (深度 {depth + 1}): {e}")
+                    # 即使失敗也要繼續處理其他節點
 
-        except Exception:
-            pass
-
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.error(f"載入子節點列表失敗 (深度 {depth}): {e}")
 
     def on_selection_changed(self):
         """處理選擇變更"""
         selected_items = self.tree_widget.selectedItems()
         if selected_items:
-            self.selected_node = selected_items[0].text(1)
-            self.select_btn.setEnabled(True)
+            selected_item = selected_items[0]
+            display_name = selected_item.text(0)
+            node_id = selected_item.text(1)
+            data_type = selected_item.text(3) if selected_item.text(3) != "-" else "未知"
+            can_write = selected_item.data(0, Qt.ItemDataRole.UserRole + 2)
+            
+            if can_write:
+                self.selected_node = f"{display_name}|{node_id}|{data_type}"
+                self.select_btn.setEnabled(True)
+                self.status_label.setText("已選擇可寫入節點")
+                self.status_label.setStyleSheet("color: green;")
+            else:
+                self.selected_node = ""
+                self.select_btn.setEnabled(False)
+                self.status_label.setText("選擇的節點為唯讀，無法寫入")
+                self.status_label.setStyleSheet("color: red;")
         else:
             self.selected_node = ""
             self.select_btn.setEnabled(False)
+            self.status_label.setText("")
 
     def on_item_double_clicked(self, item, column):
         """處理雙擊事件"""
-        self.selected_node = item.text(1)
-        self.accept()
+        display_name = item.text(0)
+        node_id = item.text(1)
+        data_type = item.text(3) if item.text(3) != "-" else "未知"
+        can_write = item.data(0, Qt.ItemDataRole.UserRole + 2)
+        
+        if can_write:
+            self.selected_node = f"{display_name}|{node_id}|{data_type}"
+            self.accept()
+        else:
+            self.status_label.setText("無法選擇唯讀節點")
+            self.status_label.setStyleSheet("color: red;")
 
     def get_selected_node(self) -> str:
-        """取得選擇的節點 ID"""
+        """取得選擇的節點 ID 和資料型別"""
         return self.selected_node
 
 
@@ -2186,6 +2677,7 @@ class ScheduleEditDialog(QDialog):
     def __init__(self, parent=None, schedule: Dict[str, Any] = None):
         super().__init__(parent)
         self.schedule = schedule
+        self.original_rrule = ""  # 儲存原始的 RRULE 字串
 
         # 初始化OPC設定
         self.opc_security_policy = schedule.get("opc_security_policy", "None") if schedule else "None"
@@ -2197,6 +2689,11 @@ class ScheduleEditDialog(QDialog):
 
         self.setup_ui()
         self.apply_style()
+
+        # 如果是新增模式，設置預設任務名稱
+        if not schedule and parent and hasattr(parent, 'db_manager'):
+            default_name = parent.db_manager.get_next_task_name()
+            self.task_name_edit.setText(default_name)
 
         if schedule:
             self.load_data()
@@ -2252,9 +2749,22 @@ class ScheduleEditDialog(QDialog):
         basic_layout.addLayout(node_id_layout, 2, 1)
 
         basic_layout.addWidget(QLabel("目標值:"), 3, 0)
+        target_layout = QHBoxLayout()
         self.target_value_edit = QLineEdit()
         self.target_value_edit.setPlaceholderText("1")
-        basic_layout.addWidget(self.target_value_edit, 3, 1)
+        target_layout.addWidget(self.target_value_edit)
+        
+        # 型別顯示 - 簡單文字標籤
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("型別:"))
+        self.data_type_label = QLabel("未偵測")
+        self.data_type_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+        type_layout.addWidget(self.data_type_label)
+        type_layout.addStretch()
+        
+        basic_layout.addLayout(type_layout, 3, 1)
+        
+        basic_layout.addLayout(target_layout, 3, 1)
 
         basic_layout.addWidget(QLabel("狀態:"), 4, 0)
         self.enabled_checkbox = QCheckBox("啟用排程")
@@ -2283,14 +2793,14 @@ class ScheduleEditDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
+        ok_btn = QPushButton("確定")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.on_ok_clicked)
+        button_layout.addWidget(ok_btn)
+
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
-
-        ok_btn = QPushButton("確定")
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.accept)
-        button_layout.addWidget(ok_btn)
 
         layout.addLayout(button_layout)
 
@@ -2481,22 +2991,26 @@ class ScheduleEditDialog(QDialog):
         self.opc_url_edit.setText(opc_url)
         self.node_id_edit.setText(self.schedule.get("node_id", ""))
         self.target_value_edit.setText(self.schedule.get("target_value", ""))
-        self.rrule_display.setText(self.schedule.get("rrule_str", ""))
+        data_type = self.schedule.get("data_type", "auto")
+        # 如果是"auto"，顯示為"未偵測"
+        display_data_type = "未偵測" if data_type == "auto" else data_type
+        self.data_type_label.setText(display_data_type)
+        
+        # 儲存原始 RRULE 字串，並顯示格式化的描述
+        self.original_rrule = self.schedule.get("rrule_str", "")
+        # 暫時直接顯示原始 RRULE，稍後可以改進為格式化顯示
+        self.rrule_display.setText(self.original_rrule if self.original_rrule else "未設定")
+        
         self.enabled_checkbox.setChecked(bool(self.schedule.get("is_enabled", 1)))
-
-    def _normalize_opc_url(self) -> str:
-        """規範化 OPC URL：添加 opc.tcp:// 前綴（如果需要）"""
-        opc_url = self.opc_url_edit.text().strip()
-        if opc_url and not opc_url.startswith("opc.tcp://"):
-            opc_url = f"opc.tcp://{opc_url}"
-        return opc_url
 
     def edit_recurrence(self):
         """編輯週期規則"""
-        current_rrule = self.rrule_display.text()
+        current_rrule = self.original_rrule
         rrule = show_recurrence_dialog(self, current_rrule)
         if rrule:
-            self.rrule_display.setText(rrule)
+            self.original_rrule = rrule
+            # 暫時直接顯示原始 RRULE，稍後可以改進為格式化顯示
+            self.rrule_display.setText(rrule if rrule else "未設定")
 
     def get_data(self) -> Dict[str, Any]:
         """取得編輯的資料"""
@@ -2510,7 +3024,9 @@ class ScheduleEditDialog(QDialog):
             "opc_url": opc_url,
             "node_id": self.node_id_edit.text(),
             "target_value": self.target_value_edit.text(),
-            "rrule_str": self.rrule_display.text(),
+            # 處理資料型別：如果顯示"未偵測"，儲存為"auto"
+            "data_type": "auto" if self.data_type_label.text() == "未偵測" else self.data_type_label.text(),
+            "rrule_str": self.original_rrule,
             "opc_security_policy": self.opc_security_policy,
             "opc_security_mode": self.opc_security_mode,
             "opc_username": self.opc_username,
@@ -2518,6 +3034,61 @@ class ScheduleEditDialog(QDialog):
             "opc_timeout": self.opc_timeout,
             "is_enabled": 1 if self.enabled_checkbox.isChecked() else 0,
         }
+
+    def on_ok_clicked(self):
+        """確定按鈕點擊處理"""
+        # 檢查任務名稱
+        task_name = self.task_name_edit.text().strip()
+        if not task_name:
+            QMessageBox.warning(
+                self,
+                "任務名稱未設定",
+                "請輸入任務名稱。",
+            )
+            return
+
+        # 檢查 OPC URL
+        opc_url = self.opc_url_edit.text().strip()
+        if not opc_url:
+            QMessageBox.warning(
+                self,
+                "OPC URL 未設定",
+                "請輸入 OPC URL。",
+            )
+            return
+
+        # 檢查 Node ID
+        node_id = self.node_id_edit.text().strip()
+        if not node_id:
+            QMessageBox.warning(
+                self,
+                "Node ID 未設定",
+                "請輸入或瀏覽選擇 Node ID。",
+            )
+            return
+
+        # 檢查目標值
+        target_value = self.target_value_edit.text().strip()
+        if not target_value:
+            QMessageBox.warning(
+                self,
+                "目標值未設定",
+                "請輸入目標值。",
+            )
+            return
+
+        # 檢查 rrule 是否為空
+        rrule_str = self.rrule_display.text().strip()
+        if not rrule_str:
+            QMessageBox.warning(
+                self,
+                "週期規則未設定",
+                "請設定排程的週期規則，無法儲存空的週期規則。",
+            )
+            return
+
+        # 如果檢查通過，接受對話框
+        self.accept()
 
     def browse_opcua_nodes(self):
         """瀏覽 OPC UA 節點"""
@@ -2536,7 +3107,16 @@ class ScheduleEditDialog(QDialog):
         if dialog.exec() == QDialog.Accepted:
             selected_node = dialog.get_selected_node()
             if selected_node:
-                self.node_id_edit.setText(selected_node)
+                # 解析選擇的節點資訊: display_name|node_id|data_type
+                parts = selected_node.split("|")
+                if len(parts) >= 2:
+                    display_name = parts[0]
+                    node_id = parts[1]
+                    data_type = parts[2] if len(parts) > 2 else "未知"
+                    
+                    # 設定節點 ID 和自動偵測的資料型別
+                    self.node_id_edit.setText(f"{display_name}|{node_id}")
+                    self.data_type_label.setText(data_type)
 
     def configure_opc_settings(self):
         """設定 OPC UA 連線參數"""
