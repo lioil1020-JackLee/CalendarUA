@@ -105,6 +105,9 @@ class RecurrenceDialog(QDialog):
         duration_label.setObjectName("fieldLabel")
         layout.addWidget(duration_label, 2, 0)
         self.duration_combo = QComboBox()
+        # 允許自訂輸入（可編輯），但不要自動插入新項目
+        self.duration_combo.setEditable(True)
+        self.duration_combo.setInsertPolicy(QComboBox.NoInsert)
         self.duration_combo.setFixedWidth(130)
         self.update_duration_combo()
         layout.addWidget(self.duration_combo, 2, 1)
@@ -178,6 +181,10 @@ class RecurrenceDialog(QDialog):
         self.end_time_combo.activated.connect(self.on_end_time_changed)
         self.end_time_combo.editTextChanged.connect(self.on_end_time_changed)
         self.duration_combo.currentIndexChanged.connect(self.on_duration_changed)
+        # 支援使用者直接在可編輯的 combo 中輸入自訂期間
+        if self.duration_combo.isEditable() and self.duration_combo.lineEdit() is not None:
+            self.duration_combo.lineEdit().editingFinished.connect(self.on_duration_text_edited)
+            self.duration_combo.lineEdit().textChanged.connect(self.on_duration_text_changed)
 
         # 頻率選擇變更
         self.radio_daily.toggled.connect(self.on_frequency_changed)
@@ -194,7 +201,7 @@ class RecurrenceDialog(QDialog):
             self._updating_times = True
             try:
                 start_time = self.get_time_from_combo(self.start_time_combo)
-                duration_minutes = self.duration_combo.currentData()
+                duration_minutes = self.get_duration_minutes()
                 if start_time and duration_minutes is not None:
                     # 重新格式化開始時間顯示，確保上午/下午格式正確
                     self.set_combo_to_time(self.start_time_combo, start_time)
@@ -383,8 +390,9 @@ class RecurrenceDialog(QDialog):
         self.daily_interval.setFixedWidth(50)
         layout.addWidget(self.daily_interval)
 
-        # 為"天"標籤設置最小寬度，確保可見
+        # 為"天"標籤設置物件名稱與最小寬度，確保套用 fieldLabel 樣式並可見
         day_label = QLabel("天")
+        day_label.setObjectName("fieldLabel")
         day_label.setMinimumWidth(20)
         layout.addWidget(day_label)
 
@@ -754,12 +762,87 @@ class RecurrenceDialog(QDialog):
             self._updating_times = True
             try:
                 start_time = self.get_time_from_combo(self.start_time_combo)
-                duration_minutes = self.duration_combo.currentData()
+                duration_minutes = self.get_duration_minutes()
+                # 選取內建項目時，取消自訂旗標
+                if self.duration_combo.currentIndex() >= 0:
+                    self._using_custom_duration = False
+
                 if start_time and duration_minutes is not None:
                     end_time = start_time.addSecs(duration_minutes * 60)
                     self.set_combo_to_time(self.end_time_combo, end_time)
             finally:
                 self._updating_times = False
+
+    def on_duration_text_changed(self, text: str):
+        """在使用者輸入期間文字時，提供即時的輸入驗證（不立即套用）"""
+        # 目前不強制更新結束時間，等 editingFinished 再處理
+        return
+
+    def on_duration_text_edited(self):
+        """使用者在可編輯的 combo 完成輸入後，解析並套用期間"""
+        text = self.duration_combo.currentText()
+        minutes = self.parse_duration_text(text)
+        if minutes is None:
+            return
+        # 如果輸入可以解析，設定為自訂期間並更新結束時間
+        self.set_custom_duration(minutes)
+        # 觸發與選擇改變相同的行為
+        self.on_duration_changed(self.duration_combo.currentIndex())
+
+    def parse_duration_text(self, text: str):
+        """解析使用者輸入的期間文字，回傳分鐘數或 None。支援簡單的單位：分/時/日 或純數字（視為分鐘）。"""
+        if not text:
+            return None
+        s = text.strip()
+        try:
+            # 純數字視為分鐘
+            if s.isdigit():
+                return int(s)
+            # 結尾包含單位
+            if s.endswith('分'):
+                num = s[:-1].strip()
+                return int(float(num))
+            if s.endswith('時'):
+                num = s[:-1].strip()
+                return int(float(num) * 60)
+            if s.endswith('日'):
+                num = s[:-1].strip()
+                return int(float(num) * 1440)
+            # 允許 '1.5 小時' 或 '1.5時' 之類的點號
+            for unit, factor in [('分', 1), ('時', 60), ('日', 1440)]:
+                if unit in s:
+                    try:
+                        num = float(s.replace(unit, '').strip())
+                        return int(num * factor)
+                    except:
+                        return None
+        except Exception:
+            return None
+        return None
+
+    def get_duration_minutes(self):
+        """取得目前期間的分鐘數：優先取選單項目的 data，否則取自訂儲存值。"""
+        # 先檢查目前文字是否與選單中某個項目完全相符
+        text = self.duration_combo.currentText()
+        for i in range(self.duration_combo.count()):
+            if self.duration_combo.itemText(i) == text:
+                data = self.duration_combo.itemData(i)
+                if isinstance(data, int):
+                    return data
+
+        # 若未匹配任何項目，嘗試解析目前文字為分鐘數
+        minutes = self.parse_duration_text(text)
+        if minutes is not None:
+            return minutes
+
+        # 如果都失敗，回傳 None
+        return None
+
+    def set_custom_duration(self, minutes: int):
+        """把自訂分鐘設為 combo 的顯示文字（不新增到選單項目）並記錄。"""
+        self._custom_duration_minutes = minutes
+        # 顯示用文字（以分為單位）
+        self.duration_combo.setCurrentText(f"{minutes} 分")
 
     def on_ok_clicked(self):
         """確定按點擊"""
@@ -795,7 +878,7 @@ class RecurrenceDialog(QDialog):
         dtstart = f"{start_date.year()}{start_date.month():02d}{start_date.day():02d}T{hour:02d}{minute:02d}00"
 
         # 期間
-        duration_minutes = self.duration_combo.currentData() or 30
+        duration_minutes = self.get_duration_minutes() or 30
         duration_str = f"DURATION=PT{duration_minutes}M"
 
         # 根據頻率設定
