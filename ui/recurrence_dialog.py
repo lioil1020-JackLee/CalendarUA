@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QMessageBox,
 )
-from PySide6.QtCore import Qt, QDate, QTime, Signal
+from PySide6.QtCore import Qt, QDate, QTime, Signal, QEvent
 from PySide6.QtGui import QFont, QIcon
 import sys
 import os
@@ -236,6 +236,14 @@ class RecurrenceDialog(QDialog):
         if self.duration_combo.isEditable() and self.duration_combo.lineEdit() is not None:
             self.duration_combo.lineEdit().editingFinished.connect(self.on_duration_text_edited)
             self.duration_combo.lineEdit().textChanged.connect(self.on_duration_text_changed)
+
+        # 確保時間 combo box 的 lineEdit 正確處理鍵盤輸入
+        if self.start_time_combo.isEditable() and self.start_time_combo.lineEdit() is not None:
+            self.start_time_combo.lineEdit().editingFinished.connect(self.on_start_time_changed)
+            self.start_time_combo.lineEdit().installEventFilter(self)
+        if self.end_time_combo.isEditable() and self.end_time_combo.lineEdit() is not None:
+            self.end_time_combo.lineEdit().editingFinished.connect(self.on_end_time_changed)
+            self.end_time_combo.lineEdit().installEventFilter(self)
 
         # 頻率選擇變更
         self.radio_daily.toggled.connect(self.on_frequency_changed)
@@ -1416,6 +1424,17 @@ class RecurrenceDialog(QDialog):
     def get_rrule(self) -> str:
         """取得 RRULE 字串"""
         return self.build_rrule()
+
+    def eventFilter(self, obj, event):
+        """事件過濾器，用於處理時間 combo box 的鍵盤輸入"""
+        if obj in [self.start_time_combo.lineEdit(), self.end_time_combo.lineEdit()]:
+            if event.type() == QEvent.KeyPress:
+                # 確保刪除和退格鍵正常工作
+                if event.key() in [Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End]:
+                    # 讓預設處理繼續，但確保事件被接受
+                    event.accept()
+                    return False
+        return super().eventFilter(obj, event)
 
 
 def show_recurrence_dialog(parent=None, current_rrule: str = "") -> str:
