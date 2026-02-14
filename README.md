@@ -110,12 +110,12 @@ CalendarUA/
 *新增排程對話框：設定基本任務資訊*
 
 #### 2. OPC UA 連線設定
-![OPC UA 連線設定](image/OPC UA 連線設定.png)
+![OPC UA 連線設定](image/OPC_UA連線設定.png)
 
 *OPC UA 安全配置：設定連線參數和認證資訊*
 
 #### 3. 瀏覽 OPC UA 節點
-![瀏覽 OPC UA 節點](image/瀏覽 OPC UA 節點.png)
+![瀏覽 OPC UA 節點](image/瀏覽OPC_UA節點.png)
 
 *OPC UA 節點瀏覽器：選擇要控制的節點*
 
