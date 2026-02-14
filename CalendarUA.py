@@ -521,12 +521,12 @@ class CalendarUA(QMainWindow):
                 background-color: white;
             }
             QCheckBox::indicator:hover {
-                border: 2px solid #0078d4;
+                border: 2px solid #0e639c;
                 background-color: #f0f0f0;
             }
             QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border: 2px solid #0078d4;
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
                 image: url(:/checkbox_check);
             }
         """)
@@ -1730,12 +1730,13 @@ class OPCSettingsDialog(QDialog):
                 background-color: white;
             }
             QCheckBox::indicator:hover {
-                border: 2px solid #0078d4;
+                border: 2px solid #0e639c;
                 background-color: #f0f0f0;
             }
             QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border: 2px solid #0078d4;
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+                image: url(:/checkbox_check);
             }
         """)
 
@@ -1825,6 +1826,7 @@ class OPCSettingsDialog(QDialog):
             QCheckBox::indicator:checked {
                 background-color: #0e639c;
                 border: 2px solid #0e639c;
+                image: url(:/checkbox_check);
             }
         """)
 
@@ -2351,12 +2353,13 @@ class ScheduleEditDialog(QDialog):
                 background-color: white;
             }
             QCheckBox::indicator:hover {
-                border: 2px solid #0078d4;
+                border: 2px solid #0e639c;
                 background-color: #f0f0f0;
             }
             QCheckBox::indicator:checked {
-                background-color: #0078d4;
-                border: 2px solid #0078d4;
+                background-color: #0e639c;
+                border: 2px solid #0e639c;
+                image: url(:/checkbox_check);
             }
         """)
 
@@ -2436,6 +2439,7 @@ class ScheduleEditDialog(QDialog):
             QCheckBox::indicator:checked {
                 background-color: #0e639c;
                 border: 2px solid #0e639c;
+                image: url(:/checkbox_check);
             }
         """)
 
