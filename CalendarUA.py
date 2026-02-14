@@ -193,26 +193,6 @@ class CalendarUA(QMainWindow):
         self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.calendar.setHorizontalHeaderFormat(QCalendarWidget.SingleLetterDayNames)
 
-        # 設定日曆樣式
-        self.calendar.setStyleSheet("""
-            QCalendarWidget {
-                background-color: white;
-            }
-            QCalendarWidget QTableView {
-                selection-background-color: #0078d4;
-                selection-color: white;
-            }
-            QCalendarWidget QWidget#qt_calendar_navigationbar {
-                background-color: #0078d4;
-            }
-            QCalendarWidget QToolButton {
-                color: white;
-                background-color: transparent;
-                border: none;
-                font-weight: bold;
-            }
-        """)
-
         layout.addWidget(self.calendar)
 
         # 當天排程摘要
@@ -239,27 +219,42 @@ class CalendarUA(QMainWindow):
 
         self.btn_add = QPushButton("+ 新增排程")
         self.btn_add.setToolTip("新增排程任務")
+        self.btn_add.setFixedSize(100, 30)
         self.btn_add.clicked.connect(self.add_schedule)
 
         self.btn_edit = QPushButton("✎ 編輯")
         self.btn_edit.setToolTip("編輯選取的排程")
+        self.btn_edit.setFixedSize(100, 30)
         self.btn_edit.clicked.connect(self.edit_schedule)
         self.btn_edit.setEnabled(False)
 
         self.btn_delete = QPushButton("✕ 刪除")
         self.btn_delete.setToolTip("刪除選取的排程")
+        self.btn_delete.setFixedSize(100, 30)
         self.btn_delete.clicked.connect(self.delete_schedule)
         self.btn_delete.setEnabled(False)
 
-        self.btn_refresh = QPushButton("↻ 重新整理")
-        self.btn_refresh.setToolTip("重新載入排程列表")
-        self.btn_refresh.clicked.connect(self.load_schedules)
+        # 資料庫設定按鈕
+        self.btn_db_settings = QPushButton("⚙ 資料庫設定")
+        self.btn_db_settings.setToolTip("設定資料庫連線")
+        self.btn_db_settings.setFixedSize(100, 30)
+        self.btn_db_settings.clicked.connect(self.show_db_settings)
+
+        # 主題設定下拉選單
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("系統主題", "system")
+        self.theme_combo.addItem("亮色模式", "light")
+        self.theme_combo.addItem("暗色模式", "dark")
+        self.theme_combo.setCurrentText("跟隨系統" if self.current_theme == "system" else ("亮色模式" if self.current_theme == "light" else "暗色模式"))
+        self.theme_combo.setFixedSize(100, 30)
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
 
         button_layout.addWidget(self.btn_add)
         button_layout.addWidget(self.btn_edit)
         button_layout.addWidget(self.btn_delete)
+        button_layout.addWidget(self.btn_db_settings)
+        button_layout.addWidget(self.theme_combo)
         button_layout.addStretch()
-        button_layout.addWidget(self.btn_refresh)
 
         layout.addLayout(button_layout)
 
@@ -300,59 +295,8 @@ class CalendarUA(QMainWindow):
 
     def create_menu_bar(self):
         """建立選單列"""
-        menubar = self.menuBar()
-
-        # 檔案選單
-        file_menu = menubar.addMenu("檔案(&F)")
-
-        exit_action = QAction("結束(&X)", self)
-        exit_action.setShortcut("Ctrl+Q")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-
-        # 工具選單
-        tools_menu = menubar.addMenu("工具(&T)")
-
-        db_settings_action = QAction("資料庫設定(&D)...", self)
-        db_settings_action.triggered.connect(self.show_db_settings)
-        tools_menu.addAction(db_settings_action)
-
-        tools_menu.addSeparator()
-
-        # 主題設定子選單
-        theme_menu = tools_menu.addMenu("主題設定(&M)")
-        self.theme_action_group = {}
-
-        theme_system_action = QAction("跟隨系統(&S)", self)
-        theme_system_action.setCheckable(True)
-        theme_system_action.setChecked(self.current_theme == "system")
-        theme_system_action.triggered.connect(lambda: self.set_theme("system"))
-        theme_menu.addAction(theme_system_action)
-        self.theme_action_group["system"] = theme_system_action
-
-        theme_light_action = QAction("亮色模式(&L)", self)
-        theme_light_action.setCheckable(True)
-        theme_light_action.setChecked(self.current_theme == "light")
-        theme_light_action.triggered.connect(lambda: self.set_theme("light"))
-        theme_menu.addAction(theme_light_action)
-        self.theme_action_group["light"] = theme_light_action
-
-        theme_dark_action = QAction("暗色模式(&D)", self)
-        theme_dark_action.setCheckable(True)
-        theme_dark_action.setChecked(self.current_theme == "dark")
-        theme_dark_action.triggered.connect(lambda: self.set_theme("dark"))
-        theme_menu.addAction(theme_dark_action)
-        self.theme_action_group["dark"] = theme_dark_action
-
-        # 確保只有一個選項被選中
-        theme_menu.triggered.connect(self._on_theme_menu_triggered)
-
-        # 說明選單
-        help_menu = menubar.addMenu("說明(&H)")
-
-        about_action = QAction("關於(&A)...", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
+        # 刪除所有選單，只保留基本的選單列結構
+        pass
 
     def _on_theme_menu_triggered(self, action):
         """處理主題選單點擊，確保只有一個選項被選中"""
@@ -362,18 +306,8 @@ class CalendarUA(QMainWindow):
 
     def create_tool_bar(self):
         """建立工具列"""
-        toolbar = QToolBar()
-        self.addToolBar(toolbar)
-
-        add_action = QAction("新增", self)
-        add_action.triggered.connect(self.add_schedule)
-        toolbar.addAction(add_action)
-
-        toolbar.addSeparator()
-
-        refresh_action = QAction("重新整理", self)
-        refresh_action.triggered.connect(self.load_schedules)
-        toolbar.addAction(refresh_action)
+        # 刪除工具列
+        pass
 
     def setup_connections(self):
         """設定信號連接"""
@@ -432,6 +366,7 @@ class CalendarUA(QMainWindow):
                 margin-top: 12px;
                 padding-top: 12px;
                 background-color: white;
+                color: #333;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -474,12 +409,14 @@ class CalendarUA(QMainWindow):
                 border: none;
                 border-bottom: 2px solid #0078d4;
                 font-weight: bold;
+                color: #333;
             }
             QTextEdit {
                 background-color: white;
                 border: 1px solid #d0d0d0;
                 border-radius: 4px;
                 padding: 8px;
+                color: #333;
             }
             QLabel {
                 color: #333;
@@ -550,6 +487,7 @@ class CalendarUA(QMainWindow):
                 margin-top: 12px;
                 padding-top: 12px;
                 background-color: #363636;
+                color: #cccccc;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -724,6 +662,8 @@ class CalendarUA(QMainWindow):
                 QCalendarWidget QTableView {
                     selection-background-color: #0078d4;
                     selection-color: white;
+                    background-color: white;
+                    color: black;
                 }
                 QCalendarWidget QWidget#qt_calendar_navigationbar {
                     background-color: #0078d4;
@@ -805,9 +745,10 @@ class CalendarUA(QMainWindow):
             self.current_theme = theme
             self.apply_modern_style()
 
-            # 更新選單狀態
-            if hasattr(self, "theme_action_group"):
-                self.theme_action_group[theme].setChecked(True)
+    def on_theme_changed(self):
+        """處理主題選擇改變"""
+        theme_data = self.theme_combo.currentData()
+        self.set_theme(theme_data)
 
     def init_database(self):
         """初始化資料庫連線"""
@@ -2757,24 +2698,22 @@ class ScheduleEditDialog(QDialog):
         self.target_value_edit = QLineEdit()
         self.target_value_edit.setPlaceholderText("1")
         target_layout.addWidget(self.target_value_edit)
+        basic_layout.addLayout(target_layout, 3, 1)
         
         # 型別顯示 - 簡單文字標籤
+        basic_layout.addWidget(QLabel("型別:"), 4, 0)
         type_layout = QHBoxLayout()
-        type_layout.addWidget(QLabel("型別:"))
         self.data_type_label = QLabel("未偵測")
         self.data_type_label.setStyleSheet("font-weight: bold; color: #0066cc;")
         type_layout.addWidget(self.data_type_label)
         type_layout.addStretch()
-        
-        basic_layout.addLayout(type_layout, 3, 1)
-        
-        basic_layout.addLayout(target_layout, 3, 1)
+        basic_layout.addLayout(type_layout, 4, 1)
 
-        basic_layout.addWidget(QLabel("狀態:"), 4, 0)
+        basic_layout.addWidget(QLabel("狀態:"), 5, 0)
         self.enabled_checkbox = QCheckBox("啟用排程")
         self.enabled_checkbox.setChecked(True)  # 預設啟用
         self.enabled_checkbox.setToolTip("控制此排程是否會被執行")
-        basic_layout.addWidget(self.enabled_checkbox, 4, 1)
+        basic_layout.addWidget(self.enabled_checkbox, 5, 1)
 
         layout.addWidget(basic_group)
 
@@ -3144,8 +3083,20 @@ class ScheduleEditDialog(QDialog):
             self.opc_password = settings["password"]
             self.opc_timeout = settings["timeout"]
 
+    def _normalize_opc_url(self) -> str:
+        """標準化 OPC URL，確保以 opc.tcp:// 開頭"""
+        url = self.opc_url_edit.text().strip()
+        if not url:
+            return ""
 
-async def main():
+        # 如果沒有協議前綴，添加預設的 opc.tcp://
+        if not url.startswith(("opc.tcp://", "opc.https://", "opc.wss://")):
+            url = f"opc.tcp://{url}"
+
+        return url
+
+
+def main():
     """主程式進入點"""
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
