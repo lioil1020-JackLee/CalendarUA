@@ -426,3 +426,24 @@ class SQLiteManager:
             bool: 操作成功回傳 True，否則回傳 False
         """
         return self.update_schedule(schedule_id, is_enabled=is_enabled)
+
+    def clear_all_schedules(self) -> bool:
+        """
+        清除所有排程資料
+
+        Returns:
+            bool: 清除成功回傳 True，否則回傳 False
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM schedules")
+                conn.commit()
+
+                deleted_count = cursor.rowcount
+                logger.info(f"已清除 {deleted_count} 筆排程資料")
+                return True
+
+        except sqlite3.Error as e:
+            logger.error(f"清除排程資料失敗: {e}")
+            return False

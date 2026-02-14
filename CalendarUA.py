@@ -50,6 +50,7 @@ from database.sqlite_manager import SQLiteManager
 from core.opc_handler import OPCHandler
 from core.rrule_parser import RRuleParser
 from ui.recurrence_dialog import RecurrenceDialog, show_recurrence_dialog
+from ui.database_settings_dialog import DatabaseSettingsDialog
 
 
 class SchedulerWorker(QThread):
@@ -933,7 +934,7 @@ class CalendarUA(QMainWindow):
                     opc_username=data.get("opc_username", ""),
                     opc_password=data.get("opc_password", ""),
                     opc_timeout=data.get("opc_timeout", 10),
-                    is_enabled=1,
+                    is_enabled=data.get("is_enabled", 1),
                 )
 
                 if schedule_id:
@@ -967,6 +968,7 @@ class CalendarUA(QMainWindow):
                     opc_username=data.get("opc_username", ""),
                     opc_password=data.get("opc_password", ""),
                     opc_timeout=data.get("opc_timeout", 10),
+                    is_enabled=data.get("is_enabled", 1),
                 )
 
                 if success:
@@ -1127,7 +1129,26 @@ class CalendarUA(QMainWindow):
 
     def show_db_settings(self):
         """顯示資料庫設定對話框"""
-        QMessageBox.information(self, "資料庫設定", "資料庫設定功能開發中...")
+        dialog = DatabaseSettingsDialog(self, self.db_manager)
+        dialog.database_changed.connect(self.on_database_path_changed)
+        dialog.exec()
+
+    def on_database_path_changed(self, new_path: str):
+        """處理資料庫路徑變更"""
+        # 重新初始化資料庫管理器
+        self.db_manager = SQLiteManager(new_path)
+
+        # 重新載入排程資料
+        self.load_schedules()
+
+        # 重新啟動排程工作執行緒
+        if self.scheduler_worker:
+            self.scheduler_worker.stop()
+            self.scheduler_worker.wait()
+
+        self.scheduler_worker = SchedulerWorker(self.db_manager)
+        self.scheduler_worker.trigger_task.connect(self.on_schedule_triggered)
+        self.scheduler_worker.start()
 
     def show_about(self):
         """顯示關於對話框"""
@@ -2172,6 +2193,7 @@ class ScheduleEditDialog(QDialog):
         self.opc_username = schedule.get("opc_username", "") if schedule else ""
         self.opc_password = schedule.get("opc_password", "") if schedule else ""
         self.opc_timeout = schedule.get("opc_timeout", 10) if schedule else 10
+        self.is_enabled = schedule.get("is_enabled", 1) if schedule else 1
 
         self.setup_ui()
         self.apply_style()
@@ -2233,6 +2255,12 @@ class ScheduleEditDialog(QDialog):
         self.target_value_edit = QLineEdit()
         self.target_value_edit.setPlaceholderText("1")
         basic_layout.addWidget(self.target_value_edit, 3, 1)
+
+        basic_layout.addWidget(QLabel("狀態:"), 4, 0)
+        self.enabled_checkbox = QCheckBox("啟用排程")
+        self.enabled_checkbox.setChecked(True)  # 預設啟用
+        self.enabled_checkbox.setToolTip("控制此排程是否會被執行")
+        basic_layout.addWidget(self.enabled_checkbox, 4, 1)
 
         layout.addWidget(basic_group)
 
@@ -2454,6 +2482,7 @@ class ScheduleEditDialog(QDialog):
         self.node_id_edit.setText(self.schedule.get("node_id", ""))
         self.target_value_edit.setText(self.schedule.get("target_value", ""))
         self.rrule_display.setText(self.schedule.get("rrule_str", ""))
+        self.enabled_checkbox.setChecked(bool(self.schedule.get("is_enabled", 1)))
 
     def _normalize_opc_url(self) -> str:
         """規範化 OPC URL：添加 opc.tcp:// 前綴（如果需要）"""
@@ -2487,6 +2516,7 @@ class ScheduleEditDialog(QDialog):
             "opc_username": self.opc_username,
             "opc_password": self.opc_password,
             "opc_timeout": self.opc_timeout,
+            "is_enabled": 1 if self.enabled_checkbox.isChecked() else 0,
         }
 
     def browse_opcua_nodes(self):

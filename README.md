@@ -19,7 +19,8 @@ CalendarUA/
 ├── requirements.txt       # 專案依賴庫清單
 ├── README.md              # 專案說明文檔
 ├── ui/
-│   └── recurrence_dialog.py # 週期性設定對話框 (仿 Office 週期規則視窗)
+│   ├── recurrence_dialog.py     # 週期性設定對話框 (仿 Office 週期規則視窗)
+│   └── database_settings_dialog.py # 資料庫設定對話框
 ├── core/
 │   ├── opc_handler.py         # OPC UA 讀寫邏輯與例外處理
 │   ├── opc_security_config.py # OPC UA 安全配置定義
@@ -53,3 +54,5 @@ updated_at | TIMESTAMP | 更新時間
 - 🔒 **OPC UA 安全連線**：支持多種安全策略和驗證方式
 - 💾 **SQLite 資料庫**：輕量級本地儲存，無需配置伺服器
 - ⚙️ **自動伺服器檢測**：自動偵測 OPC UA 伺服器支持的安全模式
+- 🛠️ **資料庫設定管理**：支援資料庫路徑變更、備份、還原和統計資訊查看，完整支援亮色/暗色主題切換
+- ✅ **排程啟用/停用控制**：在新增和編輯排程時可直接設定啟用狀態，或通過右鍵選單快速切換
