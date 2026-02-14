@@ -109,6 +109,7 @@ class RecurrenceDialog(QDialog):
         layout.addWidget(start_label, 0, 0)
         self.start_time_combo = QComboBox()
         self.start_time_combo.setEditable(True)
+        self.start_time_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.start_time_combo.setObjectName("startTimeCombo")
         self.populate_time_combo(self.start_time_combo)
         self.start_time_combo.setFixedWidth(120)
@@ -120,6 +121,7 @@ class RecurrenceDialog(QDialog):
         layout.addWidget(end_label, 1, 0)
         self.end_time_combo = QComboBox()
         self.end_time_combo.setEditable(True)
+        self.end_time_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.end_time_combo.setObjectName("endTimeCombo")
         self.populate_time_combo(self.end_time_combo)
         self.end_time_combo.setFixedWidth(120)
@@ -1430,16 +1432,14 @@ class RecurrenceDialog(QDialog):
         if obj in [self.start_time_combo.lineEdit(), self.end_time_combo.lineEdit()]:
             if event.type() == QEvent.KeyPress:
                 line_edit = obj
-                current_text = line_edit.text()
                 cursor_pos = line_edit.cursorPosition()
 
-                # 處理刪除和退格鍵，確保只刪除一個字符
+                # 處理刪除和退格鍵，使用更直接的方法
                 if event.key() == Qt.Key_Delete:
                     # Delete鍵：刪除游標後的字符
-                    if cursor_pos < len(current_text):
-                        new_text = current_text[:cursor_pos] + current_text[cursor_pos + 1:]
-                        line_edit.setText(new_text)
-                        line_edit.setCursorPosition(cursor_pos)
+                    if cursor_pos < len(line_edit.text()):
+                        # 使用QLineEdit的del_方法
+                        line_edit.del_()
                         event.accept()
                         return True
                     else:
@@ -1449,9 +1449,9 @@ class RecurrenceDialog(QDialog):
                 elif event.key() == Qt.Key_Backspace:
                     # Backspace鍵：刪除游標前的字符
                     if cursor_pos > 0:
-                        new_text = current_text[:cursor_pos - 1] + current_text[cursor_pos:]
-                        line_edit.setText(new_text)
+                        # 移動游標到前一個位置然後刪除
                         line_edit.setCursorPosition(cursor_pos - 1)
+                        line_edit.del_()
                         event.accept()
                         return True
                     else:
