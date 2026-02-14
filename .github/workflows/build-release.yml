@@ -59,6 +59,10 @@ jobs:
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install pyinstaller
+          uv pip install -r requirements.txt
           uv run pyinstaller CalendarUA-${{ matrix.build_type }}.spec
           cd dist
           if [ "${{ matrix.build_type }}" == "onedir" ]; then
