@@ -6,7 +6,7 @@ CalendarUA - 工業自動化排程管理系統主程式
 
 import sys
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Optional, Dict, Any, List
 import logging
 
@@ -15,6 +15,7 @@ logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -47,8 +48,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QTreeWidgetItem,
+    QTabWidget,
+    QStackedWidget,
+    QDateEdit,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize
 from PySide6.QtGui import QAction, QColor, QIcon
 import qasync
 import re
@@ -58,6 +62,15 @@ from core.opc_handler import OPCHandler
 from core.rrule_parser import RRuleParser
 from ui.recurrence_dialog import RecurrenceDialog, show_recurrence_dialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
+from core.schedule_resolver import resolve_occurrences_for_range
+from ui.schedule_canvas import DayViewWidget, WeekViewWidget
+from ui.month_grid import MonthViewWidget
+from ui.occurrence_choice_dialog import OccurrenceChoiceDialog
+from ui.weekly_panel import WeeklyPanel
+from ui.exceptions_panel import ExceptionsPanel
+from ui.holidays_panel import HolidaysPanel
+from ui.general_panel import GeneralPanel
+from ui.runtime_panel import RuntimePanel
 
 
 def get_app_icon():
@@ -164,8 +177,13 @@ class CalendarUA(QMainWindow):
         # 正在執行的任務ID集合，防止重複執行
         self.running_tasks: set[int] = set()
 
+        # 目前選取的排程 ID (Ribbon Edit/Delete 使用)
+        self.selected_schedule_id: Optional[int] = None
+
         # 主題模式: "light", "dark", "system"
         self.current_theme = "system"
+        self.current_view_mode = "week"
+        self.preview_clipboard: Optional[Dict[str, Any]] = None
 
         self.setup_ui()
         self.apply_modern_style()
@@ -188,24 +206,12 @@ class CalendarUA(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        main_layout = QHBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # 建立分割器
-        splitter = QSplitter(Qt.Horizontal)
-
-        # 左側：日曆視圖
-        left_panel = self.create_left_panel()
-        splitter.addWidget(left_panel)
-
-        # 右側：排程列表與控制
-        right_panel = self.create_right_panel()
-        splitter.addWidget(right_panel)
-
-        # 設定分割比例
-        splitter.setSizes([400, 800])
-
-        main_layout.addWidget(splitter)
+        # 主要內容面板 (全寬顯示)
+        main_panel = self.create_main_panel()
+        main_layout.addWidget(main_panel)
 
         # 建立選單列
         self.create_menu_bar()
@@ -218,122 +224,252 @@ class CalendarUA(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就緒")
 
-    def create_left_panel(self) -> QWidget:
-        """建立左側日曆面板"""
+    def create_main_panel(self) -> QWidget:
+        """建立主要內容面板（全寬顯示六個 Tab）"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # 日曆widget
-        self.calendar = QCalendarWidget()
-        self.calendar.setGridVisible(True)
-        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
-        self.calendar.setHorizontalHeaderFormat(QCalendarWidget.SingleLetterDayNames)
+        # Tab 系統
+        self.schedule_tabs = QTabWidget()
+        
+        # General Tab - 全局設定
+        self.general_panel = GeneralPanel()
+        self.general_panel.settings_changed.connect(self._on_general_settings_changed)
+        self.schedule_tabs.addTab(self.general_panel, "General")
+        
+        # Weekly Tab - 週間班表編輯
+        self.weekly_panel = WeeklyPanel()
+        self.weekly_panel.schedule_changed.connect(self.load_schedules)
+        self.schedule_tabs.addTab(self.weekly_panel, "Weekly")
+        
+        # Holidays Tab - 假日管理
+        self.holidays_panel = HolidaysPanel()
+        self.holidays_panel.holiday_changed.connect(self.load_schedules)
+        self.schedule_tabs.addTab(self.holidays_panel, "Holidays")
+        
+        # Exceptions Tab - 例外記錄管理
+        self.exceptions_panel = ExceptionsPanel()
+        self.exceptions_panel.exception_changed.connect(self.load_schedules)
+        self.schedule_tabs.addTab(self.exceptions_panel, "Exceptions")
+        
+        self.schedule_tabs.addTab(self._create_preview_tab(), "Preview")
+        
+        # Runtime Tab - 運行時狀態與覆寫
+        self.runtime_panel = RuntimePanel()
+        self.runtime_panel.override_changed.connect(self._on_runtime_override_changed)
+        self.schedule_tabs.addTab(self.runtime_panel, "Runtime")
+        
+        self.schedule_tabs.setCurrentIndex(4)
+        layout.addWidget(self.schedule_tabs)
 
-        layout.addWidget(self.calendar)
-
-        # 當天排程摘要
-        summary_group = QGroupBox("當天排程")
-        summary_layout = QVBoxLayout(summary_group)
-
-        self.daily_summary = QTextEdit()
-        self.daily_summary.setReadOnly(True)
-        self.daily_summary.setMaximumHeight(150)
-        summary_layout.addWidget(self.daily_summary)
-
-        layout.addWidget(summary_group)
-
-        return panel
-
-    def create_right_panel(self) -> QWidget:
-        """建立右側排程列表面板"""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # 按鈕工具列
-        button_layout = QHBoxLayout()
-
-        self.btn_add = QPushButton("+ 新增排程")
-        self.btn_add.setToolTip("新增排程任務")
-        self.btn_add.setFixedSize(100, 30)
-        self.btn_add.clicked.connect(self.add_schedule)
-
-        self.btn_edit = QPushButton("✎ 編輯")
-        self.btn_edit.setToolTip("編輯選取的排程")
-        self.btn_edit.setFixedSize(100, 30)
-        self.btn_edit.clicked.connect(self.edit_schedule)
-        self.btn_edit.setEnabled(False)
-
-        self.btn_delete = QPushButton("✕ 刪除")
-        self.btn_delete.setToolTip("刪除選取的排程")
-        self.btn_delete.setFixedSize(100, 30)
-        self.btn_delete.clicked.connect(self.delete_schedule)
-        self.btn_delete.setEnabled(False)
-
-        # 資料庫設定按鈕
-        self.btn_db_settings = QPushButton("⚙ 資料庫設定")
-        self.btn_db_settings.setToolTip("設定資料庫連線")
-        self.btn_db_settings.setFixedSize(100, 30)
-        self.btn_db_settings.clicked.connect(self.show_db_settings)
-
-        # 主題設定下拉選單
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItem("系統主題", "system")
-        self.theme_combo.addItem("亮色模式", "light")
-        self.theme_combo.addItem("暗色模式", "dark")
-        self.theme_combo.setCurrentText("跟隨系統" if self.current_theme == "system" else ("亮色模式" if self.current_theme == "light" else "暗色模式"))
-        self.theme_combo.setFixedSize(100, 30)
-        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
-
-        button_layout.addWidget(self.btn_add)
-        button_layout.addWidget(self.btn_edit)
-        button_layout.addWidget(self.btn_delete)
-        button_layout.addWidget(self.btn_db_settings)
-        button_layout.addWidget(self.theme_combo)
-        button_layout.addStretch()
-
-        layout.addLayout(button_layout)
-
-        # 排程表格
-        self.schedule_table = QTableWidget()
-        self.schedule_table.setColumnCount(8)
-        self.schedule_table.setHorizontalHeaderLabels(
-            ["ID", "任務名稱", "啟用", "上次執行", "下次執行", "週期規則", "節點名稱", "目標修改"]
-        )
-
-        # 設定表格樣式 - 自適應寬度
-        self.schedule_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeToContents
-        )
-        self.schedule_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.schedule_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.schedule_table.setAlternatingRowColors(True)
-        self.schedule_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.schedule_table.customContextMenuRequested.connect(
-            self.show_table_context_menu
-        )
-        self.schedule_table.itemSelectionChanged.connect(self.on_selection_changed)
-
-        layout.addWidget(self.schedule_table)
-
-        # 連線狀態面板（僅顯示資料庫狀態）
-        status_group = QGroupBox("系統狀態")
-        status_layout = QHBoxLayout(status_group)
-
+        # 資料庫狀態列
+        status_layout = QHBoxLayout()
         self.db_status_label = QLabel("資料庫: 未連線")
-
         status_layout.addWidget(self.db_status_label)
         status_layout.addStretch()
-
-        layout.addWidget(status_group)
+        layout.addLayout(status_layout)
 
         return panel
+
+    def _create_placeholder_tab(self, text: str) -> QWidget:
+        widget = QWidget()
+        tab_layout = QVBoxLayout(widget)
+        tab_layout.setContentsMargins(8, 8, 8, 8)
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignCenter)
+        tab_layout.addWidget(label)
+        return widget
+
+    def _create_preview_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        top_row = QHBoxLayout()
+
+        self.btn_view_day = QPushButton("Day")
+        self.btn_view_week = QPushButton("Week")
+        self.btn_view_month = QPushButton("Month")
+        for btn in [self.btn_view_day, self.btn_view_week, self.btn_view_month]:
+            btn.setCheckable(True)
+            btn.setFixedWidth(72)
+
+        self.btn_view_day.clicked.connect(lambda: self.set_view_mode("day"))
+        self.btn_view_week.clicked.connect(lambda: self.set_view_mode("week"))
+        self.btn_view_month.clicked.connect(lambda: self.set_view_mode("month"))
+
+        self.btn_prev_period = QPushButton("<")
+        self.btn_prev_period.setFixedWidth(36)
+        self.btn_prev_period.clicked.connect(self.go_previous_period)
+
+        self.btn_today = QPushButton("Today")
+        self.btn_today.setFixedWidth(72)
+        self.btn_today.clicked.connect(self.go_today)
+
+        self.btn_next_period = QPushButton(">")
+        self.btn_next_period.setFixedWidth(36)
+        self.btn_next_period.clicked.connect(self.go_next_period)
+
+        self.preview_date_edit = QDateEdit()
+        self.preview_date_edit.setCalendarPopup(True)
+        self.preview_date_edit.setDisplayFormat("yyyy/MM/dd")
+        self.preview_date_edit.setDate(QDate.currentDate())
+        self.preview_date_edit.dateChanged.connect(self.on_preview_date_changed)
+
+        self.view_range_label = QLabel("")
+        self.view_range_label.setAlignment(Qt.AlignCenter)
+
+        top_row.addWidget(self.btn_view_day)
+        top_row.addWidget(self.btn_view_week)
+        top_row.addWidget(self.btn_view_month)
+        top_row.addSpacing(12)
+        top_row.addWidget(self.btn_prev_period)
+        top_row.addWidget(self.btn_today)
+        top_row.addWidget(self.btn_next_period)
+        top_row.addWidget(self.preview_date_edit)
+        top_row.addStretch()
+        
+        # Category 管理按鈕
+        self.btn_manage_categories = QPushButton("管理 Category")
+        self.btn_manage_categories.setToolTip("管理排程 Category")
+        self.btn_manage_categories.clicked.connect(self.manage_categories)
+        top_row.addWidget(self.btn_manage_categories)
+        
+        top_row.addWidget(self.view_range_label)
+
+        layout.addLayout(top_row)
+
+        self.view_stack = QStackedWidget()
+        self.day_view = DayViewWidget()
+        self.week_view = WeekViewWidget()
+        self.month_view = MonthViewWidget()
+        self.month_view.date_selected.connect(self.on_month_date_selected)
+        self.month_view.context_action_requested.connect(self.on_canvas_context_action)
+        self.day_view.context_action_requested.connect(self.on_canvas_context_action)
+        self.week_view.context_action_requested.connect(self.on_canvas_context_action)
+
+        self.view_stack.addWidget(self.day_view)
+        self.view_stack.addWidget(self.week_view)
+        self.view_stack.addWidget(self.month_view)
+        layout.addWidget(self.view_stack)
+
+        self.set_view_mode("week")
+        return widget
 
     def create_menu_bar(self):
         """建立選單列"""
-        # 刪除所有選單，只保留基本的選單列結構
-        pass
+        menubar = self.menuBar()
+        
+        # File 選單
+        file_menu = menubar.addMenu("&File")
+        
+        self.action_new = QAction("&New Schedule", self)
+        self.action_new.setShortcut("Ctrl+N")
+        self.action_new.setStatusTip("新增排程")
+        self.action_new.triggered.connect(self.add_schedule)
+        file_menu.addAction(self.action_new)
+        
+        self.action_refresh = QAction("&Refresh", self)
+        self.action_refresh.setShortcut("F5")
+        self.action_refresh.setStatusTip("重新載入排程資料")
+        self.action_refresh.triggered.connect(self.refresh_schedules)
+        file_menu.addAction(self.action_refresh)
+
+        self.action_apply = QAction("&Apply Schedule", self)
+        self.action_apply.setShortcut("Ctrl+Shift+A")
+        self.action_apply.setStatusTip("套用排程變更")
+        self.action_apply.triggered.connect(self.apply_schedules)
+        file_menu.addAction(self.action_apply)
+        
+        file_menu.addSeparator()
+        
+        self.action_load_profile = QAction("&Load Profile...", self)
+        self.action_load_profile.setStatusTip("載入設定檔")
+        self.action_load_profile.triggered.connect(self.load_profile)
+        file_menu.addAction(self.action_load_profile)
+        
+        self.action_save_profile = QAction("&Save Profile...", self)
+        self.action_save_profile.setStatusTip("儲存設定檔")
+        self.action_save_profile.triggered.connect(self.save_profile)
+        file_menu.addAction(self.action_save_profile)
+        
+        file_menu.addSeparator()
+        
+        self.action_exit = QAction("E&xit", self)
+        self.action_exit.setShortcut("Ctrl+Q")
+        self.action_exit.setStatusTip("離開程式")
+        self.action_exit.triggered.connect(self.close)
+        file_menu.addAction(self.action_exit)
+        
+        # Edit 選單
+        edit_menu = menubar.addMenu("&Edit")
+        
+        self.action_edit = QAction("&Edit Schedule", self)
+        self.action_edit.setShortcut("Ctrl+E")
+        self.action_edit.setStatusTip("編輯選取的排程")
+        self.action_edit.setEnabled(False)  # 預設禁用，需要選取排程後才能用
+        self.action_edit.triggered.connect(self.edit_selected_schedule)
+        edit_menu.addAction(self.action_edit)
+        
+        self.action_delete = QAction("&Delete Schedule", self)
+        self.action_delete.setShortcut("Delete")
+        self.action_delete.setStatusTip("刪除選取的排程")
+        self.action_delete.setEnabled(False)  # 預設禁用
+        self.action_delete.triggered.connect(self.delete_selected_schedule)
+        edit_menu.addAction(self.action_delete)
+        
+        edit_menu.addSeparator()
+        
+        self.action_manage_categories = QAction("Manage &Categories...", self)
+        self.action_manage_categories.setStatusTip("管理 Category 分類")
+        self.action_manage_categories.triggered.connect(self.manage_categories)
+        edit_menu.addAction(self.action_manage_categories)
+        
+        # View 選單
+        view_menu = menubar.addMenu("&View")
+        
+        self.action_view_day = QAction("&Day View", self)
+        self.action_view_day.setShortcut("Ctrl+1")
+        self.action_view_day.setCheckable(True)
+        self.action_view_day.triggered.connect(lambda: self.set_view_mode("day"))
+        view_menu.addAction(self.action_view_day)
+        
+        self.action_view_week = QAction("&Week View", self)
+        self.action_view_week.setShortcut("Ctrl+2")
+        self.action_view_week.setCheckable(True)
+        self.action_view_week.setChecked(True)
+        self.action_view_week.triggered.connect(lambda: self.set_view_mode("week"))
+        view_menu.addAction(self.action_view_week)
+        
+        self.action_view_month = QAction("&Month View", self)
+        self.action_view_month.setShortcut("Ctrl+3")
+        self.action_view_month.setCheckable(True)
+        self.action_view_month.triggered.connect(lambda: self.set_view_mode("month"))
+        view_menu.addAction(self.action_view_month)
+        
+        view_menu.addSeparator()
+        
+        self.action_go_today = QAction("Go to &Today", self)
+        self.action_go_today.setShortcut("Ctrl+T")
+        self.action_go_today.triggered.connect(self.go_today)
+        view_menu.addAction(self.action_go_today)
+        
+        # Tools 選單
+        tools_menu = menubar.addMenu("&Tools")
+        
+        self.action_db_settings = QAction("&Database Settings...", self)
+        self.action_db_settings.setStatusTip("資料庫連線設定")
+        self.action_db_settings.triggered.connect(self.show_database_settings)
+        tools_menu.addAction(self.action_db_settings)
+        
+        # Help 選單
+        help_menu = menubar.addMenu("&Help")
+        
+        self.action_about = QAction("&About CalendarUA", self)
+        self.action_about.triggered.connect(self.show_about)
+        help_menu.addAction(self.action_about)
 
     def _on_theme_menu_triggered(self, action):
         """處理主題選單點擊，確保只有一個選項被選中"""
@@ -343,12 +479,463 @@ class CalendarUA(QMainWindow):
 
     def create_tool_bar(self):
         """建立工具列"""
-        # 刪除工具列
-        pass
+        toolbar = QToolBar("主工具列")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(24, 24))
+        self.addToolBar(toolbar)
+        
+        # Create 按鈕
+        self.btn_toolbar_new = QPushButton("New")
+        self.btn_toolbar_new.setToolTip("新增排程 (Ctrl+N)")
+        self.btn_toolbar_new.setFixedWidth(80)
+        self.btn_toolbar_new.clicked.connect(self.add_schedule)
+        toolbar.addWidget(self.btn_toolbar_new)
+        
+        toolbar.addSeparator()
+        
+        # Edit 按鈕
+        self.btn_toolbar_edit = QPushButton("Edit")
+        self.btn_toolbar_edit.setToolTip("編輯選取的排程 (Ctrl+E)")
+        self.btn_toolbar_edit.setFixedWidth(80)
+        self.btn_toolbar_edit.setEnabled(False)
+        self.btn_toolbar_edit.clicked.connect(self.edit_selected_schedule)
+        toolbar.addWidget(self.btn_toolbar_edit)
+        
+        # Delete 按鈕
+        self.btn_toolbar_delete = QPushButton("Delete")
+        self.btn_toolbar_delete.setToolTip("刪除選取的排程 (Del)")
+        self.btn_toolbar_delete.setFixedWidth(80)
+        self.btn_toolbar_delete.setEnabled(False)
+        self.btn_toolbar_delete.clicked.connect(self.delete_selected_schedule)
+        toolbar.addWidget(self.btn_toolbar_delete)
+        
+        toolbar.addSeparator()
+        
+        # Refresh 按鈕
+        self.btn_toolbar_refresh = QPushButton("Refresh")
+        self.btn_toolbar_refresh.setToolTip("重新載入排程資料 (F5)")
+        self.btn_toolbar_refresh.setFixedWidth(80)
+        self.btn_toolbar_refresh.clicked.connect(self.refresh_schedules)
+        toolbar.addWidget(self.btn_toolbar_refresh)
+
+        # Apply 按鈕
+        self.btn_toolbar_apply = QPushButton("Apply")
+        self.btn_toolbar_apply.setToolTip("套用排程變更 (Ctrl+Shift+A)")
+        self.btn_toolbar_apply.setFixedWidth(80)
+        self.btn_toolbar_apply.clicked.connect(self.apply_schedules)
+        toolbar.addWidget(self.btn_toolbar_apply)
+        
+        toolbar.addSeparator()
+        
+        # Categories 按鈕
+        self.btn_toolbar_categories = QPushButton("Categories")
+        self.btn_toolbar_categories.setToolTip("管理 Category 分類")
+        self.btn_toolbar_categories.setFixedWidth(100)
+        self.btn_toolbar_categories.clicked.connect(self.manage_categories)
+        toolbar.addWidget(self.btn_toolbar_categories)
+        
+        toolbar.addWidget(QLabel(""))  # Spacer
+        toolbar.addSeparator()
+        
+        # Scheduler 控制
+        scheduler_label = QLabel("Scheduler:")
+        toolbar.addWidget(scheduler_label)
+        
+        self.scheduler_status_label = QLabel("Running")
+        self.scheduler_status_label.setStyleSheet("color: green; font-weight: bold;")
+        toolbar.addWidget(self.scheduler_status_label)
 
     def setup_connections(self):
         """設定信號連接"""
-        self.calendar.selectionChanged.connect(self.update_daily_summary)
+        if hasattr(self, 'weekly_panel'):
+            self.weekly_panel.schedule_selected.connect(self.on_weekly_schedule_selected)
+
+    def on_preview_date_changed(self, qdate: QDate):
+        """當預覽日期改變時更新視圖"""
+        self.update_schedule_views()
+
+    def on_month_date_selected(self, qdate: QDate):
+        """月視圖點選日期時，切換到 Day 並同步日期"""
+        self.preview_date_edit.setDate(qdate)
+        self.set_view_mode("day")
+
+    def set_view_mode(self, mode: str):
+        """切換 Day/Week/Month 視圖"""
+        if mode not in {"day", "week", "month"}:
+            return
+
+        self.current_view_mode = mode
+
+        # 更新按鈕狀態
+        self.btn_view_day.setChecked(mode == "day")
+        self.btn_view_week.setChecked(mode == "week")
+        self.btn_view_month.setChecked(mode == "month")
+
+        # 更新選單狀態
+        if hasattr(self, 'action_view_day'):
+            self.action_view_day.setChecked(mode == "day")
+            self.action_view_week.setChecked(mode == "week")
+            self.action_view_month.setChecked(mode == "month")
+
+        if mode == "day":
+            self.view_stack.setCurrentIndex(0)
+        elif mode == "week":
+            self.view_stack.setCurrentIndex(1)
+        else:
+            self.view_stack.setCurrentIndex(2)
+
+        self.update_schedule_views()
+
+    def _get_week_start(self, qdate: QDate) -> QDate:
+        days_to_sunday = qdate.dayOfWeek() % 7
+        return qdate.addDays(-days_to_sunday)
+
+    def _resolve_day_occurrences(self, qdate: QDate):
+        date_obj = qdate.toPython()
+        range_start = datetime.combine(date_obj, time.min)
+        range_end = range_start + timedelta(days=1)
+        exceptions = getattr(self, 'schedule_exceptions', [])
+        holidays = getattr(self, 'holiday_entries', [])
+        return resolve_occurrences_for_range(
+            self.schedules, range_start, range_end, exceptions, holidays, self.db_manager
+        )
+
+    def _resolve_week_occurrences(self, qdate: QDate):
+        week_start = self._get_week_start(qdate)
+        start_date = week_start.toPython()
+        range_start = datetime.combine(start_date, time.min)
+        range_end = range_start + timedelta(days=7)
+        exceptions = getattr(self, 'schedule_exceptions', [])
+        holidays = getattr(self, 'holiday_entries', [])
+        return resolve_occurrences_for_range(
+            self.schedules, range_start, range_end, exceptions, holidays, self.db_manager
+        )
+
+    def _resolve_month_occurrences(self, qdate: QDate):
+        month_first = QDate(qdate.year(), qdate.month(), 1)
+        grid_start = self._get_week_start(month_first)
+        start_date = grid_start.toPython()
+        range_start = datetime.combine(start_date, time.min)
+        range_end = range_start + timedelta(days=42)
+        exceptions = getattr(self, 'schedule_exceptions', [])
+        holidays = getattr(self, 'holiday_entries', [])
+        return resolve_occurrences_for_range(
+            self.schedules, range_start, range_end, exceptions, holidays, self.db_manager
+        )
+
+    def update_schedule_views(self):
+        """更新 Day/Week/Month 視圖（MVP-1 只讀）"""
+        if not hasattr(self, "day_view"):
+            return
+
+        selected_date = self.preview_date_edit.date()
+
+        day_occurrences = self._resolve_day_occurrences(selected_date)
+        week_occurrences = self._resolve_week_occurrences(selected_date)
+        month_occurrences = self._resolve_month_occurrences(selected_date)
+
+        self.day_view.set_reference_date(selected_date)
+        self.day_view.set_occurrences(day_occurrences)
+
+        self.week_view.set_reference_date(selected_date)
+        self.week_view.set_occurrences(week_occurrences)
+
+        self.month_view.set_reference_date(selected_date)
+        self.month_view.set_selected_date(selected_date)
+        self.month_view.set_occurrences(month_occurrences)
+
+        if self.current_view_mode == "day":
+            self.view_range_label.setText(selected_date.toString("yyyy/MM/dd"))
+        elif self.current_view_mode == "week":
+            week_start = self._get_week_start(selected_date)
+            week_end = week_start.addDays(6)
+            self.view_range_label.setText(
+                f"{week_start.toString('yyyy/MM/dd')} - {week_end.toString('yyyy/MM/dd')}"
+            )
+        else:
+            self.view_range_label.setText(selected_date.toString("yyyy年 M月"))
+
+    def go_today(self):
+        today = QDate.currentDate()
+        self.preview_date_edit.setDate(today)
+
+    def go_previous_period(self):
+        selected = self.preview_date_edit.date()
+        if self.current_view_mode == "day":
+            self.preview_date_edit.setDate(selected.addDays(-1))
+        elif self.current_view_mode == "week":
+            self.preview_date_edit.setDate(selected.addDays(-7))
+        else:
+            self.preview_date_edit.setDate(selected.addMonths(-1))
+
+    def go_next_period(self):
+        selected = self.preview_date_edit.date()
+        if self.current_view_mode == "day":
+            self.preview_date_edit.setDate(selected.addDays(1))
+        elif self.current_view_mode == "week":
+            self.preview_date_edit.setDate(selected.addDays(7))
+        else:
+            self.preview_date_edit.setDate(selected.addMonths(1))
+
+    def on_canvas_context_action(self, action: str, payload: Dict[str, Any]):
+        """處理 Day/Week 視圖右鍵選單動作"""
+        if action == "open":
+            schedule_id = payload.get("schedule_id")
+            self._open_schedule_with_choice(schedule_id, payload)
+            return
+
+        if action == "delete":
+            schedule_id = payload.get("schedule_id")
+            self._delete_schedule_by_id(schedule_id)
+            return
+
+        if action == "new":
+            self.add_schedule()
+            return
+
+        if action == "copy":
+            schedule_id = payload.get("schedule_id")
+            if schedule_id:
+                self.preview_clipboard = {"schedule_id": int(schedule_id), "cut": False}
+                self.status_bar.showMessage("已複製事件")
+            return
+
+        if action == "cut":
+            schedule_id = payload.get("schedule_id")
+            if schedule_id:
+                self.preview_clipboard = {"schedule_id": int(schedule_id), "cut": True}
+                self.status_bar.showMessage("已剪下事件，請到目標時間貼上")
+            return
+
+        if action == "paste":
+            self._paste_schedule_to_payload(payload)
+            return
+
+        if action == "time_scale":
+            minutes = payload.get("minutes")
+            self.status_bar.showMessage(f"Time Scale 已切換為 {minutes} 分（MVP 目前僅顯示訊息）")
+            return
+
+        if action == "refresh":
+            self.load_schedules()
+            self.status_bar.showMessage("排程已重新整理")
+            return
+
+        if action == "apply":
+            QMessageBox.information(self, "Apply Schedule", "目前為即時寫入模式，變更已直接套用。")
+
+    def _find_schedule_by_id(self, schedule_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        if not schedule_id:
+            return None
+        for schedule in self.schedules:
+            if int(schedule.get("id", 0)) == int(schedule_id):
+                return schedule
+        return None
+
+    def _open_schedule_by_id(self, schedule_id: Optional[int]):
+        schedule = self._find_schedule_by_id(schedule_id)
+        if not schedule:
+            return
+
+        dialog = ScheduleEditDialog(self, schedule)
+        if dialog.exec() == QDialog.Accepted:
+            data = dialog.get_data()
+            if self.db_manager:
+                success = self.db_manager.update_schedule(
+                    schedule_id=schedule["id"],
+                    task_name=data["task_name"],
+                    opc_url=data["opc_url"],
+                    node_id=data["node_id"],
+                    target_value=data["target_value"],
+                    data_type=data.get("data_type", "auto"),
+                    rrule_str=data["rrule_str"],
+                    opc_security_policy=data.get("opc_security_policy", "None"),
+                    opc_security_mode=data.get("opc_security_mode", "None"),
+                    opc_username=data.get("opc_username", ""),
+                    opc_password=data.get("opc_password", ""),
+                    opc_timeout=data.get("opc_timeout", 5),
+                    opc_write_timeout=data.get("opc_write_timeout", 3),
+                    is_enabled=data.get("is_enabled", 1),
+                )
+                if success:
+                    self.load_schedules()
+
+    def _open_schedule_with_choice(self, schedule_id: Optional[int], payload: Dict[str, Any]):
+        schedule = self._find_schedule_by_id(schedule_id)
+        if not schedule:
+            return
+
+        rrule_str = str(schedule.get("rrule_str", "")).upper()
+        is_recurring = "FREQ=" in rrule_str
+
+        if not is_recurring:
+            self._open_schedule_by_id(schedule_id)
+            return
+
+        choice_dialog = OccurrenceChoiceDialog(self)
+        if choice_dialog.exec() != QDialog.Accepted:
+            return
+
+        mode = choice_dialog.selected_mode()
+        if mode == "series":
+            self._open_schedule_by_id(schedule_id)
+        else:
+            self._open_single_occurrence_editor(schedule, payload)
+
+    def _open_single_occurrence_editor(self, source_schedule: Dict[str, Any], payload: Dict[str, Any]):
+        from ui.occurrence_edit_dialog import OccurrenceEditDialog
+        if not self.db_manager:
+            return
+
+        date_text = payload.get("date")
+        target_hour = int(payload.get("hour", 8))
+        try:
+            target_date = datetime.strptime(str(date_text), "%Y-%m-%d").date()
+        except ValueError:
+            target_date = self.preview_date_edit.date().toPython()
+
+        target_dt = datetime.combine(target_date, time(target_hour, 0, 0))
+        duration_min = 60
+        end_dt = target_dt + timedelta(minutes=duration_min)
+
+        initial_data = {
+            "title": source_schedule.get("task_name", "事件"),
+            "target_value": source_schedule.get("target_value", ""),
+            "start": target_dt,
+            "end": end_dt,
+        }
+
+        dialog = OccurrenceEditDialog(self, initial_data)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        data = dialog.get_data()
+        schedule_id = source_schedule.get("id")
+        if not schedule_id:
+            return
+
+        self.db_manager.add_schedule_exception_override(
+            schedule_id=schedule_id,
+            occurrence_date=target_date,
+            override_start=data["start"],
+            override_end=data["end"],
+            override_task_name=data["title"],
+            override_target_value=data["target_value"],
+        )
+        self.status_bar.showMessage("已建立 occurrence 例外 (override)")
+        self.load_schedules()
+
+    def _delete_schedule_by_id(self, schedule_id: Optional[int]):
+        schedule = self._find_schedule_by_id(schedule_id)
+        if not schedule or not self.db_manager:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "刪除排程",
+            f"確定要刪除排程「{schedule.get('task_name', '')}」嗎？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if self.db_manager.delete_schedule(int(schedule_id)):
+            self.load_schedules()
+
+    def _paste_schedule_to_payload(self, payload: Dict[str, Any]):
+        if not self.preview_clipboard:
+            QMessageBox.information(self, "Paste", "剪貼簿中沒有可貼上的事件。")
+            return
+        if not self.db_manager:
+            return
+
+        source_id = int(self.preview_clipboard.get("schedule_id", 0))
+        source = self._find_schedule_by_id(source_id)
+        if not source:
+            QMessageBox.warning(self, "Paste", "找不到來源事件，請重新複製。")
+            self.preview_clipboard = None
+            return
+
+        date_text = payload.get("date")
+        target_hour = int(payload.get("hour", 8))
+        try:
+            target_date = datetime.strptime(str(date_text), "%Y-%m-%d").date()
+        except ValueError:
+            target_date = self.preview_date_edit.date().toPython()
+
+        new_rrule = self._move_rrule_to_datetime(
+            str(source.get("rrule_str", "")),
+            datetime.combine(target_date, time(target_hour, 0, 0)),
+        )
+
+        if self.preview_clipboard.get("cut"):
+            success = self.db_manager.update_schedule(source_id, rrule_str=new_rrule)
+            if success:
+                self.status_bar.showMessage("已移動事件")
+            self.preview_clipboard = None
+        else:
+            copied_name = f"{source.get('task_name', '事件')}-複製"
+            self.db_manager.add_schedule(
+                task_name=copied_name,
+                opc_url=str(source.get("opc_url", "")),
+                node_id=str(source.get("node_id", "")),
+                target_value=str(source.get("target_value", "")),
+                data_type=str(source.get("data_type", "auto")),
+                rrule_str=new_rrule,
+                opc_security_policy=str(source.get("opc_security_policy", "None")),
+                opc_security_mode=str(source.get("opc_security_mode", "None")),
+                opc_username=str(source.get("opc_username", "")),
+                opc_password=str(source.get("opc_password", "")),
+                opc_timeout=int(source.get("opc_timeout", 5)),
+                opc_write_timeout=int(source.get("opc_write_timeout", 3)),
+                is_enabled=int(source.get("is_enabled", 1)),
+            )
+            self.status_bar.showMessage("已貼上複製事件")
+
+        self.load_schedules()
+
+    def _move_rrule_to_datetime(self, rrule_str: str, target_dt: datetime) -> str:
+        if not rrule_str:
+            return rrule_str
+
+        parts = rrule_str.split(";")
+        new_parts: List[str] = []
+        seen_dtstart = False
+        seen_hour = False
+        seen_minute = False
+
+        for part in parts:
+            upper = part.upper()
+            if upper.startswith("DTSTART:"):
+                seen_dtstart = True
+                new_parts.append(f"DTSTART:{target_dt.strftime('%Y%m%dT%H%M%S')}")
+            elif upper.startswith("BYHOUR="):
+                seen_hour = True
+                new_parts.append(f"BYHOUR={target_dt.hour}")
+            elif upper.startswith("BYMINUTE="):
+                seen_minute = True
+                new_parts.append(f"BYMINUTE={target_dt.minute}")
+            else:
+                new_parts.append(part)
+
+        if not seen_dtstart:
+            new_parts.append(f"DTSTART:{target_dt.strftime('%Y%m%dT%H%M%S')}")
+        if not seen_hour:
+            new_parts.append(f"BYHOUR={target_dt.hour}")
+        if not seen_minute:
+            new_parts.append(f"BYMINUTE={target_dt.minute}")
+
+        return ";".join(new_parts)
+
+    def _build_single_occurrence_rrule(self, source_rrule: str, target_dt: datetime) -> str:
+        duration_match = re.search(r"DURATION=PT(?:\d+H)?(?:\d+M)?", source_rrule.upper())
+        duration_part = duration_match.group(0) if duration_match else "DURATION=PT1H"
+        return (
+            f"FREQ=DAILY;COUNT=1;"
+            f"DTSTART:{target_dt.strftime('%Y%m%dT%H%M%S')};"
+            f"BYHOUR={target_dt.hour};BYMINUTE={target_dt.minute};"
+            f"{duration_part}"
+        )
 
     def setup_system_tray(self):
         """設定系統托盤"""
@@ -518,8 +1105,6 @@ class CalendarUA(QMainWindow):
                 image: url(:/checkbox_check);
             }
         """)
-        # 更新日曆樣式
-        self._apply_calendar_light_theme()
 
     def _apply_dark_theme(self):
         """套用暗色主題"""
@@ -696,56 +1281,6 @@ class CalendarUA(QMainWindow):
                 image: url(:/checkbox_check);
             }
         """)
-        # 更新日曆樣式
-        self._apply_calendar_dark_theme()
-
-    def _apply_calendar_light_theme(self):
-        """套用日曆亮色主題"""
-        if hasattr(self, "calendar"):
-            self.calendar.setStyleSheet("""
-                QCalendarWidget {
-                    background-color: white;
-                }
-                QCalendarWidget QTableView {
-                    selection-background-color: #0078d4;
-                    selection-color: white;
-                    background-color: white;
-                    color: black;
-                }
-                QCalendarWidget QWidget#qt_calendar_navigationbar {
-                    background-color: #0078d4;
-                }
-                QCalendarWidget QToolButton {
-                    color: white;
-                    background-color: transparent;
-                    border: none;
-                    font-weight: bold;
-                }
-            """)
-
-    def _apply_calendar_dark_theme(self):
-        """套用日曆暗色主題"""
-        if hasattr(self, "calendar"):
-            self.calendar.setStyleSheet("""
-                QCalendarWidget {
-                    background-color: #2b2b2b;
-                }
-                QCalendarWidget QTableView {
-                    selection-background-color: #094771;
-                    selection-color: white;
-                    background-color: #1e1e1e;
-                    color: #cccccc;
-                }
-                QCalendarWidget QWidget#qt_calendar_navigationbar {
-                    background-color: #0e639c;
-                }
-                QCalendarWidget QToolButton {
-                    color: white;
-                    background-color: transparent;
-                    border: none;
-                    font-weight: bold;
-                }
-            """)
 
     def setup_theme_listener(self):
         """設定系統主題監聽"""
@@ -807,6 +1342,27 @@ class CalendarUA(QMainWindow):
             if self.db_manager.init_db():
                 self.db_status_label.setText("資料庫: 已連線")
                 self.db_status_label.setStyleSheet("color: green;")
+                
+                # 設定 General Panel 的 db_manager
+                if hasattr(self, 'general_panel'):
+                    self.general_panel.set_db_manager(self.db_manager)
+                
+                # 設定 Weekly Panel 的 db_manager
+                if hasattr(self, 'weekly_panel'):
+                    self.weekly_panel.set_db_manager(self.db_manager)
+                
+                # 設定 Holidays Panel 的 db_manager
+                if hasattr(self, 'holidays_panel'):
+                    self.holidays_panel.set_db_manager(self.db_manager)
+                
+                # 設定 Exceptions Panel 的 db_manager
+                if hasattr(self, 'exceptions_panel'):
+                    self.exceptions_panel.set_db_manager(self.db_manager)
+                
+                # 設定 Runtime Panel 的 db_manager
+                if hasattr(self, 'runtime_panel'):
+                    self.runtime_panel.set_db_manager(self.db_manager)
+                
                 self.load_schedules()
                 self.start_scheduler()
             else:
@@ -829,102 +1385,44 @@ class CalendarUA(QMainWindow):
             return
 
         self.schedules = self.db_manager.get_all_schedules()
+        self.schedule_exceptions = self.db_manager.get_all_schedule_exceptions()
+        self.holiday_entries = self.db_manager.get_all_holiday_entries()
         # 重置執行計數器（應用程式重啟時從 0 開始）
         self.execution_counts = {}
-        self.update_schedule_table()
-        self.update_daily_summary()
+        self.update_schedule_views()
+        
+        # 載入到 Weekly Panel
+        if hasattr(self, 'weekly_panel'):
+            self.weekly_panel.load_schedules(self.schedules)
+        
+        # 載入到 Holidays Panel
+        if hasattr(self, 'holidays_panel'):
+            self.holidays_panel.refresh()
+        
+        # 載入到 Exceptions Panel
+        if hasattr(self, 'exceptions_panel'):
+            self.exceptions_panel.load_data(self.schedules, self.schedule_exceptions)
+        
+        # 載入到 Runtime Panel
+        if hasattr(self, 'runtime_panel'):
+            self.runtime_panel.load_schedules(self.schedules)
 
         self.status_bar.showMessage(f"已載入 {len(self.schedules)} 個排程")
 
-    def update_schedule_table(self):
-        """更新排程表格"""
-        self.schedule_table.setRowCount(len(self.schedules))
+    def _on_general_settings_changed(self):
+        """全局設定變更時的處理"""
+        self.status_bar.showMessage("全局設定已更新")
+        # 可以在這裡根據新設定調整行為，例如更新掃描間隔等
+        if hasattr(self, 'general_panel'):
+            settings = self.general_panel.get_current_settings()
+            # 如果需要，可以根據 settings['enable_schedule'] 啟用/禁用排程
+            logger.info(f"全局設定已更新: {settings.get('profile_name', 'Unknown')}")
 
-        for row, schedule in enumerate(self.schedules):
-            # ID
-            id_item = QTableWidgetItem(str(schedule.get("id", "")))
-            id_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 0, id_item)
-            
-            # 任務名稱
-            task_name_item = QTableWidgetItem(schedule.get("task_name", ""))
-            task_name_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 1, task_name_item)
-
-            # 啟用狀態
-            enabled = "✓" if schedule.get("is_enabled") else "✗"
-            enabled_item = QTableWidgetItem(enabled)
-            enabled_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 2, enabled_item)
-
-            # 上次執行時間
-            last_execution_time = schedule.get("last_execution_time")
-            last_execution_status = schedule.get("last_execution_status", "")
-            
-            if last_execution_time:
-                # 格式化時間顯示
-                if isinstance(last_execution_time, str):
-                    try:
-                        dt = datetime.fromisoformat(last_execution_time.replace('Z', '+00:00'))
-                        last_time_str = dt.strftime("%Y/%m/%d %H:%M:%S")
-                    except:
-                        last_time_str = last_execution_time
-                else:
-                    last_time_str = last_execution_time.strftime("%Y/%m/%d %H:%M:%S") if last_execution_time else ""
-                
-                # 如果執行失敗，在時間後面加上(失敗)標記
-                if last_execution_status and ("失敗" in last_execution_status or "錯誤" in last_execution_status):
-                    last_time_str += "(失敗)"
-            else:
-                last_time_str = "尚未執行"
-            
-            last_time_item = QTableWidgetItem(last_time_str)
-            last_time_item.setTextAlignment(Qt.AlignCenter)
-            
-            # 如果是失敗的執行，設定紅色背景
-            if "(失敗)" in last_time_str:
-                last_time_item.setBackground(QColor("#ffebee"))  # 淺紅色
-                last_time_item.setForeground(QColor("#c62828"))  # 深紅色
-            
-            self.schedule_table.setItem(row, 3, last_time_item)
-
-            # 下次執行時間
-            is_enabled = schedule.get("is_enabled", 0)
-            if is_enabled:
-                next_execution_time = self._calculate_next_execution_time(schedule)
-            else:
-                next_execution_time = "-"
-            
-            next_time_item = QTableWidgetItem(next_execution_time)
-            next_time_item.setTextAlignment(Qt.AlignCenter)
-            
-            # 如果是過期的排程，設定特殊的顏色
-            if "(已過期)" in next_execution_time:
-                next_time_item.setBackground(QColor("#ffebee"))  # 淺紅色
-                next_time_item.setForeground(QColor("#c62828"))  # 深紅色
-            
-            self.schedule_table.setItem(row, 4, next_time_item)
-
-            # 週期規則 - 轉換為中文簡易說明
-            rrule_str = schedule.get("rrule_str", "")
-            schedule_id = schedule.get("id", 0)
-            schedule_desc = self._format_schedule_description(rrule_str, schedule_id)
-            schedule_item = QTableWidgetItem(schedule_desc)
-            schedule_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 5, schedule_item)
-
-            # 節點名稱 - 從 node_id 提取顯示名稱
-            node_id = schedule.get("node_id", "")
-            node_name = self._format_node_name(node_id)
-            node_item = QTableWidgetItem(node_name)
-            node_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 6, node_item)
-
-            # 目標修改 - 顯示目標值
-            target_value = schedule.get("target_value", "")
-            target_item = QTableWidgetItem(target_value)
-            target_item.setTextAlignment(Qt.AlignCenter)
-            self.schedule_table.setItem(row, 7, target_item)
+    def _on_runtime_override_changed(self):
+        """Runtime override 變更時的處理"""
+        self.status_bar.showMessage("Runtime Override 已更新")
+        # 可以在這裡觸發輸出更新等操作
+        logger.info("Runtime override 已變更")
 
     def _format_schedule_description(self, rrule_str: str, schedule_id: int = 0) -> str:
         """將 RRULE 轉換為中文簡易說明"""
@@ -1231,49 +1729,7 @@ class CalendarUA(QMainWindow):
         except Exception:
             return "計算失敗"
 
-    def update_daily_summary(self):
-        """更新當天排程摘要"""
-        selected_date = self.calendar.selectedDate().toPython()
 
-        # 取得當天的排程觸發時間
-        daily_schedules = []
-
-        for schedule in self.schedules:
-            if not schedule.get("is_enabled"):
-                continue
-
-            rrule_str = schedule.get("rrule_str", "")
-            if rrule_str:
-                # 取得當天的觸發時間
-                start = datetime.combine(selected_date, datetime.min.time())
-                end = datetime.combine(selected_date, datetime.max.time())
-
-                triggers = RRuleParser.get_trigger_between(rrule_str, start, end)
-
-                for trigger in triggers:
-                    daily_schedules.append(
-                        {
-                            "time": trigger.strftime("%H:%M:%S"),
-                            "name": schedule.get("task_name", ""),
-                            "value": schedule.get("target_value", ""),
-                        }
-                    )
-
-        # 排序並顯示
-        daily_schedules.sort(key=lambda x: x["time"])
-
-        if daily_schedules:
-            summary_text = f"<b>{selected_date.strftime('%Y/%m/%d')} 排程:</b><br>"
-            for item in daily_schedules:
-                summary_text += (
-                    f"<br>🕐 {item['time']} - {item['name']} ({item['value']})"
-                )
-        else:
-            summary_text = (
-                f"<b>{selected_date.strftime('%Y/%m/%d')}</b><br><br>當天沒有排程任務"
-            )
-
-        self.daily_summary.setHtml(summary_text)
 
     def add_schedule(self):
         """新增排程"""
@@ -1289,6 +1745,7 @@ class CalendarUA(QMainWindow):
                     target_value=data["target_value"],
                     data_type=data.get("data_type", "auto"),
                     rrule_str=data["rrule_str"],
+                    category_id=data.get("category_id", 1),
                     opc_security_policy=data.get("opc_security_policy", "None"),
                     opc_security_mode=data.get("opc_security_mode", "None"),
                     opc_username=data.get("opc_username", ""),
@@ -1304,13 +1761,15 @@ class CalendarUA(QMainWindow):
                 else:
                     QMessageBox.critical(self, "錯誤", "新增排程失敗")
 
-    def edit_schedule(self):
+    def edit_schedule(self, schedule_id: int = None):
         """編輯排程"""
-        current_row = self.schedule_table.currentRow()
-        if current_row < 0 or current_row >= len(self.schedules):
+        if schedule_id is None:
+            QMessageBox.information(self, "提示", "請從 Weekly Tab 中編輯排程")
             return
-
-        schedule = self.schedules[current_row]
+        
+        schedule = next((s for s in self.schedules if s['id'] == schedule_id), None)
+        if not schedule:
+            return
 
         dialog = ScheduleEditDialog(self, schedule)
         if dialog.exec() == QDialog.Accepted:
@@ -1325,6 +1784,7 @@ class CalendarUA(QMainWindow):
                     target_value=data["target_value"],
                     data_type=data.get("data_type", "auto"),
                     rrule_str=data["rrule_str"],
+                    category_id=data.get("category_id", 1),
                     opc_security_policy=data.get("opc_security_policy", "None"),
                     opc_security_mode=data.get("opc_security_mode", "None"),
                     opc_username=data.get("opc_username", ""),
@@ -1340,13 +1800,15 @@ class CalendarUA(QMainWindow):
                 else:
                     QMessageBox.critical(self, "錯誤", "更新排程失敗")
 
-    def delete_schedule(self):
+    def delete_schedule(self, schedule_id: int = None):
         """刪除排程"""
-        current_row = self.schedule_table.currentRow()
-        if current_row < 0 or current_row >= len(self.schedules):
+        if schedule_id is None:
+            QMessageBox.information(self, "提示", "請從 Weekly Tab 中刪除排程")
             return
-
-        schedule = self.schedules[current_row]
+        
+        schedule = next((s for s in self.schedules if s['id'] == schedule_id), None)
+        if not schedule:
+            return
 
         reply = QMessageBox.question(
             self,
@@ -1366,41 +1828,265 @@ class CalendarUA(QMainWindow):
                 else:
                     QMessageBox.critical(self, "錯誤", "刪除排程失敗")
 
-    def on_selection_changed(self):
-        """處理表格選擇變更"""
-        has_selection = self.schedule_table.currentRow() >= 0
-        self.btn_edit.setEnabled(has_selection)
-        self.btn_delete.setEnabled(has_selection)
+    def manage_categories(self):
+        """開啟 Category 管理對話框"""
+        from ui.category_manager_dialog import CategoryManagerDialog
+        
+        dialog = CategoryManagerDialog(self, self.db_manager)
+        dialog.category_changed.connect(self.on_category_changed)
+        dialog.exec()
 
-    def show_table_context_menu(self, position):
-        """顯示表格右鍵選單"""
-        menu = QMenu()
+    def on_category_changed(self):
+        """當 Category 變更時重新載入視圖"""
+        self.load_schedules()  # 重新載入排程以更新 category 顏色
 
-        edit_action = menu.addAction("編輯")
-        edit_action.triggered.connect(self.edit_schedule)
+    def on_weekly_schedule_selected(self, schedule_id: Optional[int]):
+        """Weekly Tab 選取變更"""
+        self._set_selected_schedule_id(schedule_id)
 
-        delete_action = menu.addAction("刪除")
-        delete_action.triggered.connect(self.delete_schedule)
+    def _set_selected_schedule_id(self, schedule_id: Optional[int]):
+        self.selected_schedule_id = schedule_id
+        has_selection = schedule_id is not None
 
-        menu.addSeparator()
+        if hasattr(self, 'action_edit'):
+            self.action_edit.setEnabled(has_selection)
+        if hasattr(self, 'action_delete'):
+            self.action_delete.setEnabled(has_selection)
+        if hasattr(self, 'btn_toolbar_edit'):
+            self.btn_toolbar_edit.setEnabled(has_selection)
+        if hasattr(self, 'btn_toolbar_delete'):
+            self.btn_toolbar_delete.setEnabled(has_selection)
 
-        toggle_action = menu.addAction("啟用/停用")
-        toggle_action.triggered.connect(self.toggle_schedule_enabled)
+    def edit_selected_schedule(self):
+        """編輯目前選取的排程"""
+        if self.selected_schedule_id is None:
+            QMessageBox.information(self, "提示", "請先選取要編輯的排程")
+            return
+        self.edit_schedule(self.selected_schedule_id)
 
-        menu.exec(self.schedule_table.viewport().mapToGlobal(position))
+    def delete_selected_schedule(self):
+        """刪除目前選取的排程"""
+        if self.selected_schedule_id is None:
+            QMessageBox.information(self, "提示", "請先選取要刪除的排程")
+            return
+        self.delete_schedule(self.selected_schedule_id)
 
-    def toggle_schedule_enabled(self):
-        """切換排程啟用狀態"""
-        current_row = self.schedule_table.currentRow()
-        if current_row < 0 or current_row >= len(self.schedules):
+    def refresh_schedules(self):
+        """重新載入排程資料 (F5)"""
+        if not self.db_manager:
+            QMessageBox.warning(self, "警告", "資料庫未連線")
+            return
+        
+        self.status_bar.showMessage("正在重新載入排程...")
+        self.load_schedules()
+        self.status_bar.showMessage(f"已重新載入 {len(self.schedules)} 個排程", 3000)
+
+    def apply_schedules(self):
+        """套用排程變更"""
+        if not self.db_manager:
+            QMessageBox.warning(self, "警告", "資料庫未連線")
             return
 
-        schedule = self.schedules[current_row]
-        new_status = 0 if schedule.get("is_enabled") else 1
+        # 目前所有變更皆即時寫入，此處仍提供一致的操作入口
+        self.load_schedules()
+        self.status_bar.showMessage("已套用排程變更", 3000)
 
-        if self.db_manager:
-            self.db_manager.toggle_schedule(schedule["id"], new_status)
-            self.load_schedules()
+    def load_profile(self):
+        """載入設定檔"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "載入 Profile 設定檔",
+            "",
+            "JSON Files (*.json);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            import json
+            with open(file_path, 'r', encoding='utf-8') as f:
+                profile_data = json.load(f)
+            
+            # 載入 General Settings
+            if 'general_settings' in profile_data and hasattr(self, 'general_panel'):
+                self.general_panel.load_from_dict(profile_data['general_settings'])
+
+            if self.db_manager:
+                # 載入 Categories (僅使用者自訂)
+                categories = profile_data.get('categories', [])
+                if categories:
+                    existing_categories = {c['name']: c for c in self.db_manager.get_all_categories()}
+                    for cat in categories:
+                        name = cat.get('name', '').strip()
+                        if not name:
+                            continue
+                        bg_color = cat.get('bg_color', '#FFFFFF')
+                        fg_color = cat.get('fg_color', '#000000')
+                        sort_order = int(cat.get('sort_order', 0) or 0)
+                        existing = existing_categories.get(name)
+                        if existing:
+                            if existing.get('is_system'):
+                                continue
+                            self.db_manager.update_category(
+                                existing['id'],
+                                name=name,
+                                bg_color=bg_color,
+                                fg_color=fg_color,
+                                sort_order=sort_order,
+                            )
+                        else:
+                            self.db_manager.add_category(name, bg_color, fg_color, sort_order)
+
+                # 載入 Schedules
+                schedules = profile_data.get('schedules', [])
+                if schedules:
+                    existing_schedules = self.db_manager.get_all_schedules()
+                    for sch in schedules:
+                        task_name = str(sch.get('task_name', '')).strip()
+                        rrule_str = str(sch.get('rrule_str', '')).strip()
+                        opc_url = str(sch.get('opc_url', '')).strip()
+                        node_id = str(sch.get('node_id', '')).strip()
+                        if not task_name or not rrule_str:
+                            continue
+
+                        matched = next(
+                            (
+                                s for s in existing_schedules
+                                if s.get('task_name') == task_name
+                                and str(s.get('rrule_str', '')).strip() == rrule_str
+                                and str(s.get('opc_url', '')).strip() == opc_url
+                                and str(s.get('node_id', '')).strip() == node_id
+                            ),
+                            None,
+                        )
+
+                        data = {
+                            "task_name": task_name,
+                            "opc_url": opc_url,
+                            "node_id": node_id,
+                            "target_value": str(sch.get('target_value', '')),
+                            "data_type": str(sch.get('data_type', 'auto')),
+                            "rrule_str": rrule_str,
+                            "category_id": int(sch.get('category_id', 1) or 1),
+                            "opc_security_policy": str(sch.get('opc_security_policy', 'None')),
+                            "opc_security_mode": str(sch.get('opc_security_mode', 'None')),
+                            "opc_username": str(sch.get('opc_username', '')),
+                            "opc_password": str(sch.get('opc_password', '')),
+                            "opc_timeout": int(sch.get('opc_timeout', 5) or 5),
+                            "opc_write_timeout": int(sch.get('opc_write_timeout', 3) or 3),
+                            "is_enabled": int(sch.get('is_enabled', 1) or 1),
+                        }
+
+                        if matched:
+                            self.db_manager.update_schedule(matched['id'], **data)
+                        else:
+                            self.db_manager.add_schedule(**data)
+
+                self.load_schedules()
+            
+            QMessageBox.information(self, "成功", f"已載入設定檔:\n{file_path}")
+            self.status_bar.showMessage(f"已載入 Profile: {file_path}", 5000)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "錯誤", f"載入設定檔失敗:\n{str(e)}")
+
+    def save_profile(self):
+        """儲存設定檔"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "儲存 Profile 設定檔",
+            "",
+            "JSON Files (*.json);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith('.json'):
+            file_path = f"{file_path}.json"
+        
+        try:
+            import json
+            profile_data = {}
+            
+            # 儲存 General Settings
+            if hasattr(self, 'general_panel'):
+                profile_data['general_settings'] = self.general_panel.get_current_settings()
+
+            # 儲存 Categories (僅使用者自訂)
+            if self.db_manager:
+                categories = [
+                    {
+                        "name": c.get("name"),
+                        "bg_color": c.get("bg_color"),
+                        "fg_color": c.get("fg_color"),
+                        "sort_order": c.get("sort_order", 0),
+                    }
+                    for c in self.db_manager.get_all_categories()
+                    if not c.get("is_system")
+                ]
+                profile_data['categories'] = categories
+
+                schedules = []
+                for s in self.db_manager.get_all_schedules():
+                    schedules.append(
+                        {
+                            "task_name": s.get("task_name"),
+                            "opc_url": s.get("opc_url"),
+                            "node_id": s.get("node_id"),
+                            "target_value": s.get("target_value"),
+                            "data_type": s.get("data_type", "auto"),
+                            "rrule_str": s.get("rrule_str"),
+                            "category_id": s.get("category_id", 1),
+                            "opc_security_policy": s.get("opc_security_policy", "None"),
+                            "opc_security_mode": s.get("opc_security_mode", "None"),
+                            "opc_username": s.get("opc_username", ""),
+                            "opc_password": s.get("opc_password", ""),
+                            "opc_timeout": s.get("opc_timeout", 5),
+                            "opc_write_timeout": s.get("opc_write_timeout", 3),
+                            "is_enabled": s.get("is_enabled", 1),
+                        }
+                    )
+                profile_data['schedules'] = schedules
+            
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(profile_data, f, indent=2, ensure_ascii=False)
+            
+            QMessageBox.information(self, "成功", f"已儲存設定檔:\n{file_path}")
+            self.status_bar.showMessage(f"已儲存 Profile: {file_path}", 5000)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "錯誤", f"儲存設定檔失敗:\n{str(e)}")
+
+    def show_database_settings(self):
+        """顯示資料庫設定對話框"""
+        dialog = DatabaseSettingsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            # 重新連線資料庫
+            self.init_database()
+
+    def show_about(self):
+        """顯示關於對話框"""
+        about_text = """
+        <h2>CalendarUA</h2>
+        <p>版本: 1.0.0</p>
+        <p>工業自動化排程管理系統</p>
+        <p>採用 PySide6 開發，支援 OPC UA 通訊</p>
+        <br>
+        <p><b>主要功能:</b></p>
+        <ul>
+            <li>週期性排程管理 (RRULE)</li>
+            <li>例外與假日支援</li>
+            <li>Day/Week/Month 視圖</li>
+            <li>Category 分類系統</li>
+            <li>Runtime 覆寫控制</li>
+        </ul>
+        <br>
+        <p>© 2026 CalendarUA Project</p>
+        """
+        QMessageBox.about(self, "關於 CalendarUA", about_text)
+
 
     def start_scheduler(self):
         """啟動排程背景工作"""
@@ -2836,6 +3522,9 @@ class ScheduleEditDialog(QDialog):
         self.schedule = schedule
         self.original_rrule = ""  # 儲存原始的 RRULE 字串
 
+        # 取得資料庫管理器
+        self.db_manager = parent.db_manager if parent and hasattr(parent, 'db_manager') else None
+
         # 初始化OPC設定
         self.opc_security_policy = schedule.get("opc_security_policy", "None") if schedule else "None"
         self.opc_security_mode = schedule.get("opc_security_mode", "None") if schedule else "None"
@@ -2923,11 +3612,23 @@ class ScheduleEditDialog(QDialog):
         type_layout.addStretch()
         basic_layout.addLayout(type_layout, 4, 1)
 
-        basic_layout.addWidget(QLabel("狀態:"), 5, 0)
+        # Category 選單
+        basic_layout.addWidget(QLabel("Category:"), 5, 0)
+        category_layout = QHBoxLayout()
+        self.category_combo = QComboBox()
+        self.category_combo.setMinimumWidth(200)
+        category_layout.addWidget(self.category_combo)
+        category_layout.addStretch()
+        basic_layout.addLayout(category_layout, 5, 1)
+        
+        # 載入 categories
+        self._load_categories()
+
+        basic_layout.addWidget(QLabel("狀態:"), 6, 0)
         self.enabled_checkbox = QCheckBox("啟用排程")
         self.enabled_checkbox.setChecked(True)  # 預設啟用
         self.enabled_checkbox.setToolTip("控制此排程是否會被執行")
-        basic_layout.addWidget(self.enabled_checkbox, 5, 1)
+        basic_layout.addWidget(self.enabled_checkbox, 6, 1)
 
         layout.addWidget(basic_group)
 
@@ -3138,6 +3839,29 @@ class ScheduleEditDialog(QDialog):
             }
         """)
 
+    def _load_categories(self):
+        """載入 Category 清單到下拉選單"""
+        self.category_combo.clear()
+        
+        if not self.db_manager:
+            # 如果沒有資料庫管理器，只加入預設項目
+            self.category_combo.addItem("Red (關閉)", 1)
+            return
+        
+        try:
+            categories = self.db_manager.get_all_categories()
+            for cat in categories:
+                # 顯示名稱加上顏色預覽 (用色塊符號)
+                display_name = f"{cat['name']}"
+                self.category_combo.addItem(display_name, cat['id'])
+            
+            # 預設選擇第一個 (Red)
+            self.category_combo.setCurrentIndex(0)
+        except Exception as e:
+            print(f"載入 Categories 失敗: {e}")
+            # 失敗時加入預設項目
+            self.category_combo.addItem("Red (關閉)", 1)
+
     def load_data(self):
         """載入現有資料"""
         self.task_name_edit.setText(self.schedule.get("task_name", ""))
@@ -3152,6 +3876,13 @@ class ScheduleEditDialog(QDialog):
         # 如果是"auto"，顯示為"未偵測"
         display_data_type = "未偵測" if data_type == "auto" else data_type
         self.data_type_label.setText(display_data_type)
+        
+        # 載入 Category
+        category_id = self.schedule.get("category_id", 1)
+        for i in range(self.category_combo.count()):
+            if self.category_combo.itemData(i) == category_id:
+                self.category_combo.setCurrentIndex(i)
+                break
         
         # 儲存原始 RRULE 字串，並顯示格式化的描述
         self.original_rrule = self.schedule.get("rrule_str", "")
@@ -3175,6 +3906,11 @@ class ScheduleEditDialog(QDialog):
         opc_url = self.opc_url_edit.text().strip()
         if opc_url and not opc_url.startswith("opc.tcp://"):
             opc_url = f"opc.tcp://{opc_url}"
+        
+        # 取得選擇的 category_id
+        category_id = self.category_combo.currentData()
+        if category_id is None:
+            category_id = 1  # 預設 Red
 
         return {
             "task_name": self.task_name_edit.text(),
@@ -3184,6 +3920,7 @@ class ScheduleEditDialog(QDialog):
             # 處理資料型別：如果顯示"未偵測"，儲存為"auto"
             "data_type": "auto" if self.data_type_label.text() == "未偵測" else self.data_type_label.text(),
             "rrule_str": self.original_rrule,
+            "category_id": category_id,
             "opc_security_policy": self.opc_security_policy,
             "opc_security_mode": self.opc_security_mode,
             "opc_username": self.opc_username,
