@@ -229,6 +229,7 @@ class CalendarUA(QMainWindow):
         self.schedule_tabs.addTab(self.exceptions_panel, "Exceptions")
         
         # General Tab - 全局設定
+ 
         self.general_panel = GeneralPanel()
         self.general_panel.settings_changed.connect(self._on_general_settings_changed)
         self.schedule_tabs.addTab(self.general_panel, "General")
