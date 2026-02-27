@@ -5,7 +5,8 @@ from datetime import datetime
 from typing import Dict, List
 
 from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtWidgets import QLabel, QMenu, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QHeaderView, QLabel, QMenu, QTableWidget, QVBoxLayout, QWidget
 
 from core.schedule_resolver import ResolvedOccurrence
 
@@ -32,9 +33,20 @@ class MonthViewWidget(QWidget):
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setVisible(True)
-        self.table.verticalHeader().setDefaultSectionSize(112)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setFixedHeight(42)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        header_font = QFont(self.table.horizontalHeader().font())
+        header_font.setFamily("Times New Roman")
+        header_font.setPointSize(16)
+        header_font.setBold(True)
+        self.table.horizontalHeader().setFont(header_font)
+        self.table.horizontalHeader().setStyleSheet("QHeaderView::section { padding: 0px; font-family: 'Times New Roman'; font-weight: 700; }")
         self.table.cellClicked.connect(self._on_cell_clicked)
 
         self.table.setHorizontalHeaderLabels(["日", "一", "二", "三", "四", "五", "六"])

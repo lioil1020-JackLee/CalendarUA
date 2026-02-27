@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import List
 
 from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QMenu, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import QHeaderView, QMenu, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from core.schedule_resolver import ResolvedOccurrence
 
@@ -40,8 +40,16 @@ class ScheduleTimeGridWidget(QWidget):
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
-        self.table.verticalHeader().setDefaultSectionSize(28)
-        self.table.horizontalHeader().setDefaultSectionSize(120)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setFixedHeight(34)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self.table.horizontalHeader().setStyleSheet("QHeaderView::section { padding: 0px 2px; font-family: 'Times New Roman'; font-weight: 700; }")
+        header_font = QFont(self.table.horizontalHeader().font())
+        header_font.setFamily("Times New Roman")
+        header_font.setPointSize(14)
+        header_font.setBold(True)
+        self.table.horizontalHeader().setFont(header_font)
 
         for row in range(24):
             self.table.setVerticalHeaderItem(row, QTableWidgetItem(_hour_label(row)))
@@ -73,7 +81,7 @@ class ScheduleTimeGridWidget(QWidget):
         day_names = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"]
         for offset in range(7):
             day = sunday.addDays(offset)
-            labels.append(f"{day_names[offset]} {day.toString('d')}")
+            labels.append(f"{day_names[offset]} {day.day()}")
         self.table.setHorizontalHeaderLabels(labels)
 
     def _ensure_items(self):

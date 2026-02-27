@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QGroupBox,
     QMessageBox,
     QHeaderView,
@@ -62,15 +63,9 @@ from core.opc_handler import OPCHandler
 from core.rrule_parser import RRuleParser
 from ui.recurrence_dialog import RecurrenceDialog, show_recurrence_dialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
-from core.schedule_resolver import resolve_occurrences_for_range
-from ui.schedule_canvas import DayViewWidget, WeekViewWidget
-from ui.month_grid import MonthViewWidget
-from ui.occurrence_choice_dialog import OccurrenceChoiceDialog
-from ui.weekly_panel import WeeklyPanel
 from ui.exceptions_panel import ExceptionsPanel
 from ui.holidays_panel import HolidaysPanel
 from ui.general_panel import GeneralPanel
-from ui.runtime_panel import RuntimePanel
 
 
 def get_app_icon():
@@ -182,8 +177,6 @@ class CalendarUA(QMainWindow):
 
         # 主題模式: "light", "dark", "system"
         self.current_theme = "system"
-        self.current_view_mode = "week"
-        self.preview_clipboard: Optional[Dict[str, Any]] = None
 
         self.setup_ui()
         self.apply_modern_style()
@@ -216,51 +209,36 @@ class CalendarUA(QMainWindow):
         # 建立選單列
         self.create_menu_bar()
 
-        # 建立工具列
-        self.create_tool_bar()
-
         # 建立狀態列
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就緒")
 
     def create_main_panel(self) -> QWidget:
-        """建立主要內容面板（全寬顯示六個 Tab）"""
+        """建立主要內容面板（全寬顯示三個 Tab）"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
         # Tab 系統
         self.schedule_tabs = QTabWidget()
+
+        # Exceptions Tab - 例外記錄管理
+        self.exceptions_panel = ExceptionsPanel()
+        self.exceptions_panel.exception_changed.connect(self.load_schedules)
+        self.schedule_tabs.addTab(self.exceptions_panel, "Exceptions")
         
         # General Tab - 全局設定
         self.general_panel = GeneralPanel()
         self.general_panel.settings_changed.connect(self._on_general_settings_changed)
         self.schedule_tabs.addTab(self.general_panel, "General")
         
-        # Weekly Tab - 週間班表編輯
-        self.weekly_panel = WeeklyPanel()
-        self.weekly_panel.schedule_changed.connect(self.load_schedules)
-        self.schedule_tabs.addTab(self.weekly_panel, "Weekly")
-        
         # Holidays Tab - 假日管理
         self.holidays_panel = HolidaysPanel()
         self.holidays_panel.holiday_changed.connect(self.load_schedules)
         self.schedule_tabs.addTab(self.holidays_panel, "Holidays")
-        
-        # Exceptions Tab - 例外記錄管理
-        self.exceptions_panel = ExceptionsPanel()
-        self.exceptions_panel.exception_changed.connect(self.load_schedules)
-        self.schedule_tabs.addTab(self.exceptions_panel, "Exceptions")
-        
-        self.schedule_tabs.addTab(self._create_preview_tab(), "Preview")
-        
-        # Runtime Tab - 運行時狀態與覆寫
-        self.runtime_panel = RuntimePanel()
-        self.runtime_panel.override_changed.connect(self._on_runtime_override_changed)
-        self.schedule_tabs.addTab(self.runtime_panel, "Runtime")
-        
-        self.schedule_tabs.setCurrentIndex(4)
+
+        self.schedule_tabs.setCurrentIndex(0)
         layout.addWidget(self.schedule_tabs)
 
         # 資料庫狀態列
@@ -271,92 +249,6 @@ class CalendarUA(QMainWindow):
         layout.addLayout(status_layout)
 
         return panel
-
-    def _create_placeholder_tab(self, text: str) -> QWidget:
-        widget = QWidget()
-        tab_layout = QVBoxLayout(widget)
-        tab_layout.setContentsMargins(8, 8, 8, 8)
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
-        tab_layout.addWidget(label)
-        return widget
-
-    def _create_preview_tab(self) -> QWidget:
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-
-        top_row = QHBoxLayout()
-
-        self.btn_view_day = QPushButton("Day")
-        self.btn_view_week = QPushButton("Week")
-        self.btn_view_month = QPushButton("Month")
-        for btn in [self.btn_view_day, self.btn_view_week, self.btn_view_month]:
-            btn.setCheckable(True)
-            btn.setFixedWidth(72)
-
-        self.btn_view_day.clicked.connect(lambda: self.set_view_mode("day"))
-        self.btn_view_week.clicked.connect(lambda: self.set_view_mode("week"))
-        self.btn_view_month.clicked.connect(lambda: self.set_view_mode("month"))
-
-        self.btn_prev_period = QPushButton("<")
-        self.btn_prev_period.setFixedWidth(36)
-        self.btn_prev_period.clicked.connect(self.go_previous_period)
-
-        self.btn_today = QPushButton("Today")
-        self.btn_today.setFixedWidth(72)
-        self.btn_today.clicked.connect(self.go_today)
-
-        self.btn_next_period = QPushButton(">")
-        self.btn_next_period.setFixedWidth(36)
-        self.btn_next_period.clicked.connect(self.go_next_period)
-
-        self.preview_date_edit = QDateEdit()
-        self.preview_date_edit.setCalendarPopup(True)
-        self.preview_date_edit.setDisplayFormat("yyyy/MM/dd")
-        self.preview_date_edit.setDate(QDate.currentDate())
-        self.preview_date_edit.dateChanged.connect(self.on_preview_date_changed)
-
-        self.view_range_label = QLabel("")
-        self.view_range_label.setAlignment(Qt.AlignCenter)
-
-        top_row.addWidget(self.btn_view_day)
-        top_row.addWidget(self.btn_view_week)
-        top_row.addWidget(self.btn_view_month)
-        top_row.addSpacing(12)
-        top_row.addWidget(self.btn_prev_period)
-        top_row.addWidget(self.btn_today)
-        top_row.addWidget(self.btn_next_period)
-        top_row.addWidget(self.preview_date_edit)
-        top_row.addStretch()
-        
-        # Category 管理按鈕
-        self.btn_manage_categories = QPushButton("管理 Category")
-        self.btn_manage_categories.setToolTip("管理排程 Category")
-        self.btn_manage_categories.clicked.connect(self.manage_categories)
-        top_row.addWidget(self.btn_manage_categories)
-        
-        top_row.addWidget(self.view_range_label)
-
-        layout.addLayout(top_row)
-
-        self.view_stack = QStackedWidget()
-        self.day_view = DayViewWidget()
-        self.week_view = WeekViewWidget()
-        self.month_view = MonthViewWidget()
-        self.month_view.date_selected.connect(self.on_month_date_selected)
-        self.month_view.context_action_requested.connect(self.on_canvas_context_action)
-        self.day_view.context_action_requested.connect(self.on_canvas_context_action)
-        self.week_view.context_action_requested.connect(self.on_canvas_context_action)
-
-        self.view_stack.addWidget(self.day_view)
-        self.view_stack.addWidget(self.week_view)
-        self.view_stack.addWidget(self.month_view)
-        layout.addWidget(self.view_stack)
-
-        self.set_view_mode("week")
-        return widget
 
     def create_menu_bar(self):
         """建立選單列"""
@@ -408,15 +300,15 @@ class CalendarUA(QMainWindow):
         
         self.action_edit = QAction("&Edit Schedule", self)
         self.action_edit.setShortcut("Ctrl+E")
-        self.action_edit.setStatusTip("編輯選取的排程")
-        self.action_edit.setEnabled(False)  # 預設禁用，需要選取排程後才能用
+        self.action_edit.setStatusTip("編輯排程")
+        self.action_edit.setEnabled(True)
         self.action_edit.triggered.connect(self.edit_selected_schedule)
         edit_menu.addAction(self.action_edit)
         
         self.action_delete = QAction("&Delete Schedule", self)
         self.action_delete.setShortcut("Delete")
-        self.action_delete.setStatusTip("刪除選取的排程")
-        self.action_delete.setEnabled(False)  # 預設禁用
+        self.action_delete.setStatusTip("刪除排程")
+        self.action_delete.setEnabled(True)
         self.action_delete.triggered.connect(self.delete_selected_schedule)
         edit_menu.addAction(self.action_delete)
         
@@ -426,35 +318,6 @@ class CalendarUA(QMainWindow):
         self.action_manage_categories.setStatusTip("管理 Category 分類")
         self.action_manage_categories.triggered.connect(self.manage_categories)
         edit_menu.addAction(self.action_manage_categories)
-        
-        # View 選單
-        view_menu = menubar.addMenu("&View")
-        
-        self.action_view_day = QAction("&Day View", self)
-        self.action_view_day.setShortcut("Ctrl+1")
-        self.action_view_day.setCheckable(True)
-        self.action_view_day.triggered.connect(lambda: self.set_view_mode("day"))
-        view_menu.addAction(self.action_view_day)
-        
-        self.action_view_week = QAction("&Week View", self)
-        self.action_view_week.setShortcut("Ctrl+2")
-        self.action_view_week.setCheckable(True)
-        self.action_view_week.setChecked(True)
-        self.action_view_week.triggered.connect(lambda: self.set_view_mode("week"))
-        view_menu.addAction(self.action_view_week)
-        
-        self.action_view_month = QAction("&Month View", self)
-        self.action_view_month.setShortcut("Ctrl+3")
-        self.action_view_month.setCheckable(True)
-        self.action_view_month.triggered.connect(lambda: self.set_view_mode("month"))
-        view_menu.addAction(self.action_view_month)
-        
-        view_menu.addSeparator()
-        
-        self.action_go_today = QAction("Go to &Today", self)
-        self.action_go_today.setShortcut("Ctrl+T")
-        self.action_go_today.triggered.connect(self.go_today)
-        view_menu.addAction(self.action_go_today)
         
         # Tools 選單
         tools_menu = menubar.addMenu("&Tools")
@@ -495,17 +358,17 @@ class CalendarUA(QMainWindow):
         
         # Edit 按鈕
         self.btn_toolbar_edit = QPushButton("Edit")
-        self.btn_toolbar_edit.setToolTip("編輯選取的排程 (Ctrl+E)")
+        self.btn_toolbar_edit.setToolTip("編輯排程 (Ctrl+E)")
         self.btn_toolbar_edit.setFixedWidth(80)
-        self.btn_toolbar_edit.setEnabled(False)
+        self.btn_toolbar_edit.setEnabled(True)
         self.btn_toolbar_edit.clicked.connect(self.edit_selected_schedule)
         toolbar.addWidget(self.btn_toolbar_edit)
         
         # Delete 按鈕
         self.btn_toolbar_delete = QPushButton("Delete")
-        self.btn_toolbar_delete.setToolTip("刪除選取的排程 (Del)")
+        self.btn_toolbar_delete.setToolTip("刪除排程 (Del)")
         self.btn_toolbar_delete.setFixedWidth(80)
-        self.btn_toolbar_delete.setEnabled(False)
+        self.btn_toolbar_delete.setEnabled(True)
         self.btn_toolbar_delete.clicked.connect(self.delete_selected_schedule)
         toolbar.addWidget(self.btn_toolbar_delete)
         
@@ -547,395 +410,7 @@ class CalendarUA(QMainWindow):
 
     def setup_connections(self):
         """設定信號連接"""
-        if hasattr(self, 'weekly_panel'):
-            self.weekly_panel.schedule_selected.connect(self.on_weekly_schedule_selected)
-
-    def on_preview_date_changed(self, qdate: QDate):
-        """當預覽日期改變時更新視圖"""
-        self.update_schedule_views()
-
-    def on_month_date_selected(self, qdate: QDate):
-        """月視圖點選日期時，切換到 Day 並同步日期"""
-        self.preview_date_edit.setDate(qdate)
-        self.set_view_mode("day")
-
-    def set_view_mode(self, mode: str):
-        """切換 Day/Week/Month 視圖"""
-        if mode not in {"day", "week", "month"}:
-            return
-
-        self.current_view_mode = mode
-
-        # 更新按鈕狀態
-        self.btn_view_day.setChecked(mode == "day")
-        self.btn_view_week.setChecked(mode == "week")
-        self.btn_view_month.setChecked(mode == "month")
-
-        # 更新選單狀態
-        if hasattr(self, 'action_view_day'):
-            self.action_view_day.setChecked(mode == "day")
-            self.action_view_week.setChecked(mode == "week")
-            self.action_view_month.setChecked(mode == "month")
-
-        if mode == "day":
-            self.view_stack.setCurrentIndex(0)
-        elif mode == "week":
-            self.view_stack.setCurrentIndex(1)
-        else:
-            self.view_stack.setCurrentIndex(2)
-
-        self.update_schedule_views()
-
-    def _get_week_start(self, qdate: QDate) -> QDate:
-        days_to_sunday = qdate.dayOfWeek() % 7
-        return qdate.addDays(-days_to_sunday)
-
-    def _resolve_day_occurrences(self, qdate: QDate):
-        date_obj = qdate.toPython()
-        range_start = datetime.combine(date_obj, time.min)
-        range_end = range_start + timedelta(days=1)
-        exceptions = getattr(self, 'schedule_exceptions', [])
-        holidays = getattr(self, 'holiday_entries', [])
-        return resolve_occurrences_for_range(
-            self.schedules, range_start, range_end, exceptions, holidays, self.db_manager
-        )
-
-    def _resolve_week_occurrences(self, qdate: QDate):
-        week_start = self._get_week_start(qdate)
-        start_date = week_start.toPython()
-        range_start = datetime.combine(start_date, time.min)
-        range_end = range_start + timedelta(days=7)
-        exceptions = getattr(self, 'schedule_exceptions', [])
-        holidays = getattr(self, 'holiday_entries', [])
-        return resolve_occurrences_for_range(
-            self.schedules, range_start, range_end, exceptions, holidays, self.db_manager
-        )
-
-    def _resolve_month_occurrences(self, qdate: QDate):
-        month_first = QDate(qdate.year(), qdate.month(), 1)
-        grid_start = self._get_week_start(month_first)
-        start_date = grid_start.toPython()
-        range_start = datetime.combine(start_date, time.min)
-        range_end = range_start + timedelta(days=42)
-        exceptions = getattr(self, 'schedule_exceptions', [])
-        holidays = getattr(self, 'holiday_entries', [])
-        return resolve_occurrences_for_range(
-            self.schedules, range_start, range_end, exceptions, holidays, self.db_manager
-        )
-
-    def update_schedule_views(self):
-        """更新 Day/Week/Month 視圖（MVP-1 只讀）"""
-        if not hasattr(self, "day_view"):
-            return
-
-        selected_date = self.preview_date_edit.date()
-
-        day_occurrences = self._resolve_day_occurrences(selected_date)
-        week_occurrences = self._resolve_week_occurrences(selected_date)
-        month_occurrences = self._resolve_month_occurrences(selected_date)
-
-        self.day_view.set_reference_date(selected_date)
-        self.day_view.set_occurrences(day_occurrences)
-
-        self.week_view.set_reference_date(selected_date)
-        self.week_view.set_occurrences(week_occurrences)
-
-        self.month_view.set_reference_date(selected_date)
-        self.month_view.set_selected_date(selected_date)
-        self.month_view.set_occurrences(month_occurrences)
-
-        if self.current_view_mode == "day":
-            self.view_range_label.setText(selected_date.toString("yyyy/MM/dd"))
-        elif self.current_view_mode == "week":
-            week_start = self._get_week_start(selected_date)
-            week_end = week_start.addDays(6)
-            self.view_range_label.setText(
-                f"{week_start.toString('yyyy/MM/dd')} - {week_end.toString('yyyy/MM/dd')}"
-            )
-        else:
-            self.view_range_label.setText(selected_date.toString("yyyy年 M月"))
-
-    def go_today(self):
-        today = QDate.currentDate()
-        self.preview_date_edit.setDate(today)
-
-    def go_previous_period(self):
-        selected = self.preview_date_edit.date()
-        if self.current_view_mode == "day":
-            self.preview_date_edit.setDate(selected.addDays(-1))
-        elif self.current_view_mode == "week":
-            self.preview_date_edit.setDate(selected.addDays(-7))
-        else:
-            self.preview_date_edit.setDate(selected.addMonths(-1))
-
-    def go_next_period(self):
-        selected = self.preview_date_edit.date()
-        if self.current_view_mode == "day":
-            self.preview_date_edit.setDate(selected.addDays(1))
-        elif self.current_view_mode == "week":
-            self.preview_date_edit.setDate(selected.addDays(7))
-        else:
-            self.preview_date_edit.setDate(selected.addMonths(1))
-
-    def on_canvas_context_action(self, action: str, payload: Dict[str, Any]):
-        """處理 Day/Week 視圖右鍵選單動作"""
-        if action == "open":
-            schedule_id = payload.get("schedule_id")
-            self._open_schedule_with_choice(schedule_id, payload)
-            return
-
-        if action == "delete":
-            schedule_id = payload.get("schedule_id")
-            self._delete_schedule_by_id(schedule_id)
-            return
-
-        if action == "new":
-            self.add_schedule()
-            return
-
-        if action == "copy":
-            schedule_id = payload.get("schedule_id")
-            if schedule_id:
-                self.preview_clipboard = {"schedule_id": int(schedule_id), "cut": False}
-                self.status_bar.showMessage("已複製事件")
-            return
-
-        if action == "cut":
-            schedule_id = payload.get("schedule_id")
-            if schedule_id:
-                self.preview_clipboard = {"schedule_id": int(schedule_id), "cut": True}
-                self.status_bar.showMessage("已剪下事件，請到目標時間貼上")
-            return
-
-        if action == "paste":
-            self._paste_schedule_to_payload(payload)
-            return
-
-        if action == "time_scale":
-            minutes = payload.get("minutes")
-            self.status_bar.showMessage(f"Time Scale 已切換為 {minutes} 分（MVP 目前僅顯示訊息）")
-            return
-
-        if action == "refresh":
-            self.load_schedules()
-            self.status_bar.showMessage("排程已重新整理")
-            return
-
-        if action == "apply":
-            QMessageBox.information(self, "Apply Schedule", "目前為即時寫入模式，變更已直接套用。")
-
-    def _find_schedule_by_id(self, schedule_id: Optional[int]) -> Optional[Dict[str, Any]]:
-        if not schedule_id:
-            return None
-        for schedule in self.schedules:
-            if int(schedule.get("id", 0)) == int(schedule_id):
-                return schedule
-        return None
-
-    def _open_schedule_by_id(self, schedule_id: Optional[int]):
-        schedule = self._find_schedule_by_id(schedule_id)
-        if not schedule:
-            return
-
-        dialog = ScheduleEditDialog(self, schedule)
-        if dialog.exec() == QDialog.Accepted:
-            data = dialog.get_data()
-            if self.db_manager:
-                success = self.db_manager.update_schedule(
-                    schedule_id=schedule["id"],
-                    task_name=data["task_name"],
-                    opc_url=data["opc_url"],
-                    node_id=data["node_id"],
-                    target_value=data["target_value"],
-                    data_type=data.get("data_type", "auto"),
-                    rrule_str=data["rrule_str"],
-                    opc_security_policy=data.get("opc_security_policy", "None"),
-                    opc_security_mode=data.get("opc_security_mode", "None"),
-                    opc_username=data.get("opc_username", ""),
-                    opc_password=data.get("opc_password", ""),
-                    opc_timeout=data.get("opc_timeout", 5),
-                    opc_write_timeout=data.get("opc_write_timeout", 3),
-                    is_enabled=data.get("is_enabled", 1),
-                )
-                if success:
-                    self.load_schedules()
-
-    def _open_schedule_with_choice(self, schedule_id: Optional[int], payload: Dict[str, Any]):
-        schedule = self._find_schedule_by_id(schedule_id)
-        if not schedule:
-            return
-
-        rrule_str = str(schedule.get("rrule_str", "")).upper()
-        is_recurring = "FREQ=" in rrule_str
-
-        if not is_recurring:
-            self._open_schedule_by_id(schedule_id)
-            return
-
-        choice_dialog = OccurrenceChoiceDialog(self)
-        if choice_dialog.exec() != QDialog.Accepted:
-            return
-
-        mode = choice_dialog.selected_mode()
-        if mode == "series":
-            self._open_schedule_by_id(schedule_id)
-        else:
-            self._open_single_occurrence_editor(schedule, payload)
-
-    def _open_single_occurrence_editor(self, source_schedule: Dict[str, Any], payload: Dict[str, Any]):
-        from ui.occurrence_edit_dialog import OccurrenceEditDialog
-        if not self.db_manager:
-            return
-
-        date_text = payload.get("date")
-        target_hour = int(payload.get("hour", 8))
-        try:
-            target_date = datetime.strptime(str(date_text), "%Y-%m-%d").date()
-        except ValueError:
-            target_date = self.preview_date_edit.date().toPython()
-
-        target_dt = datetime.combine(target_date, time(target_hour, 0, 0))
-        duration_min = 60
-        end_dt = target_dt + timedelta(minutes=duration_min)
-
-        initial_data = {
-            "title": source_schedule.get("task_name", "事件"),
-            "target_value": source_schedule.get("target_value", ""),
-            "start": target_dt,
-            "end": end_dt,
-        }
-
-        dialog = OccurrenceEditDialog(self, initial_data)
-        if dialog.exec() != QDialog.Accepted:
-            return
-
-        data = dialog.get_data()
-        schedule_id = source_schedule.get("id")
-        if not schedule_id:
-            return
-
-        self.db_manager.add_schedule_exception_override(
-            schedule_id=schedule_id,
-            occurrence_date=target_date,
-            override_start=data["start"],
-            override_end=data["end"],
-            override_task_name=data["title"],
-            override_target_value=data["target_value"],
-        )
-        self.status_bar.showMessage("已建立 occurrence 例外 (override)")
-        self.load_schedules()
-
-    def _delete_schedule_by_id(self, schedule_id: Optional[int]):
-        schedule = self._find_schedule_by_id(schedule_id)
-        if not schedule or not self.db_manager:
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "刪除排程",
-            f"確定要刪除排程「{schedule.get('task_name', '')}」嗎？",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        if self.db_manager.delete_schedule(int(schedule_id)):
-            self.load_schedules()
-
-    def _paste_schedule_to_payload(self, payload: Dict[str, Any]):
-        if not self.preview_clipboard:
-            QMessageBox.information(self, "Paste", "剪貼簿中沒有可貼上的事件。")
-            return
-        if not self.db_manager:
-            return
-
-        source_id = int(self.preview_clipboard.get("schedule_id", 0))
-        source = self._find_schedule_by_id(source_id)
-        if not source:
-            QMessageBox.warning(self, "Paste", "找不到來源事件，請重新複製。")
-            self.preview_clipboard = None
-            return
-
-        date_text = payload.get("date")
-        target_hour = int(payload.get("hour", 8))
-        try:
-            target_date = datetime.strptime(str(date_text), "%Y-%m-%d").date()
-        except ValueError:
-            target_date = self.preview_date_edit.date().toPython()
-
-        new_rrule = self._move_rrule_to_datetime(
-            str(source.get("rrule_str", "")),
-            datetime.combine(target_date, time(target_hour, 0, 0)),
-        )
-
-        if self.preview_clipboard.get("cut"):
-            success = self.db_manager.update_schedule(source_id, rrule_str=new_rrule)
-            if success:
-                self.status_bar.showMessage("已移動事件")
-            self.preview_clipboard = None
-        else:
-            copied_name = f"{source.get('task_name', '事件')}-複製"
-            self.db_manager.add_schedule(
-                task_name=copied_name,
-                opc_url=str(source.get("opc_url", "")),
-                node_id=str(source.get("node_id", "")),
-                target_value=str(source.get("target_value", "")),
-                data_type=str(source.get("data_type", "auto")),
-                rrule_str=new_rrule,
-                opc_security_policy=str(source.get("opc_security_policy", "None")),
-                opc_security_mode=str(source.get("opc_security_mode", "None")),
-                opc_username=str(source.get("opc_username", "")),
-                opc_password=str(source.get("opc_password", "")),
-                opc_timeout=int(source.get("opc_timeout", 5)),
-                opc_write_timeout=int(source.get("opc_write_timeout", 3)),
-                is_enabled=int(source.get("is_enabled", 1)),
-            )
-            self.status_bar.showMessage("已貼上複製事件")
-
-        self.load_schedules()
-
-    def _move_rrule_to_datetime(self, rrule_str: str, target_dt: datetime) -> str:
-        if not rrule_str:
-            return rrule_str
-
-        parts = rrule_str.split(";")
-        new_parts: List[str] = []
-        seen_dtstart = False
-        seen_hour = False
-        seen_minute = False
-
-        for part in parts:
-            upper = part.upper()
-            if upper.startswith("DTSTART:"):
-                seen_dtstart = True
-                new_parts.append(f"DTSTART:{target_dt.strftime('%Y%m%dT%H%M%S')}")
-            elif upper.startswith("BYHOUR="):
-                seen_hour = True
-                new_parts.append(f"BYHOUR={target_dt.hour}")
-            elif upper.startswith("BYMINUTE="):
-                seen_minute = True
-                new_parts.append(f"BYMINUTE={target_dt.minute}")
-            else:
-                new_parts.append(part)
-
-        if not seen_dtstart:
-            new_parts.append(f"DTSTART:{target_dt.strftime('%Y%m%dT%H%M%S')}")
-        if not seen_hour:
-            new_parts.append(f"BYHOUR={target_dt.hour}")
-        if not seen_minute:
-            new_parts.append(f"BYMINUTE={target_dt.minute}")
-
-        return ";".join(new_parts)
-
-    def _build_single_occurrence_rrule(self, source_rrule: str, target_dt: datetime) -> str:
-        duration_match = re.search(r"DURATION=PT(?:\d+H)?(?:\d+M)?", source_rrule.upper())
-        duration_part = duration_match.group(0) if duration_match else "DURATION=PT1H"
-        return (
-            f"FREQ=DAILY;COUNT=1;"
-            f"DTSTART:{target_dt.strftime('%Y%m%dT%H%M%S')};"
-            f"BYHOUR={target_dt.hour};BYMINUTE={target_dt.minute};"
-            f"{duration_part}"
-        )
+        return
 
     def setup_system_tray(self):
         """設定系統托盤"""
@@ -1347,10 +822,6 @@ class CalendarUA(QMainWindow):
                 if hasattr(self, 'general_panel'):
                     self.general_panel.set_db_manager(self.db_manager)
                 
-                # 設定 Weekly Panel 的 db_manager
-                if hasattr(self, 'weekly_panel'):
-                    self.weekly_panel.set_db_manager(self.db_manager)
-                
                 # 設定 Holidays Panel 的 db_manager
                 if hasattr(self, 'holidays_panel'):
                     self.holidays_panel.set_db_manager(self.db_manager)
@@ -1358,10 +829,6 @@ class CalendarUA(QMainWindow):
                 # 設定 Exceptions Panel 的 db_manager
                 if hasattr(self, 'exceptions_panel'):
                     self.exceptions_panel.set_db_manager(self.db_manager)
-                
-                # 設定 Runtime Panel 的 db_manager
-                if hasattr(self, 'runtime_panel'):
-                    self.runtime_panel.set_db_manager(self.db_manager)
                 
                 self.load_schedules()
                 self.start_scheduler()
@@ -1389,11 +856,6 @@ class CalendarUA(QMainWindow):
         self.holiday_entries = self.db_manager.get_all_holiday_entries()
         # 重置執行計數器（應用程式重啟時從 0 開始）
         self.execution_counts = {}
-        self.update_schedule_views()
-        
-        # 載入到 Weekly Panel
-        if hasattr(self, 'weekly_panel'):
-            self.weekly_panel.load_schedules(self.schedules)
         
         # 載入到 Holidays Panel
         if hasattr(self, 'holidays_panel'):
@@ -1403,10 +865,6 @@ class CalendarUA(QMainWindow):
         if hasattr(self, 'exceptions_panel'):
             self.exceptions_panel.load_data(self.schedules, self.schedule_exceptions)
         
-        # 載入到 Runtime Panel
-        if hasattr(self, 'runtime_panel'):
-            self.runtime_panel.load_schedules(self.schedules)
-
         self.status_bar.showMessage(f"已載入 {len(self.schedules)} 個排程")
 
     def _on_general_settings_changed(self):
@@ -1417,12 +875,6 @@ class CalendarUA(QMainWindow):
             settings = self.general_panel.get_current_settings()
             # 如果需要，可以根據 settings['enable_schedule'] 啟用/禁用排程
             logger.info(f"全局設定已更新: {settings.get('profile_name', 'Unknown')}")
-
-    def _on_runtime_override_changed(self):
-        """Runtime override 變更時的處理"""
-        self.status_bar.showMessage("Runtime Override 已更新")
-        # 可以在這裡觸發輸出更新等操作
-        logger.info("Runtime override 已變更")
 
     def _format_schedule_description(self, rrule_str: str, schedule_id: int = 0) -> str:
         """將 RRULE 轉換為中文簡易說明"""
@@ -1764,7 +1216,7 @@ class CalendarUA(QMainWindow):
     def edit_schedule(self, schedule_id: int = None):
         """編輯排程"""
         if schedule_id is None:
-            QMessageBox.information(self, "提示", "請從 Weekly Tab 中編輯排程")
+            QMessageBox.information(self, "提示", "請先選擇要編輯的排程")
             return
         
         schedule = next((s for s in self.schedules if s['id'] == schedule_id), None)
@@ -1803,7 +1255,7 @@ class CalendarUA(QMainWindow):
     def delete_schedule(self, schedule_id: int = None):
         """刪除排程"""
         if schedule_id is None:
-            QMessageBox.information(self, "提示", "請從 Weekly Tab 中刪除排程")
+            QMessageBox.information(self, "提示", "請先選擇要刪除的排程")
             return
         
         schedule = next((s for s in self.schedules if s['id'] == schedule_id), None)
@@ -1840,36 +1292,51 @@ class CalendarUA(QMainWindow):
         """當 Category 變更時重新載入視圖"""
         self.load_schedules()  # 重新載入排程以更新 category 顏色
 
-    def on_weekly_schedule_selected(self, schedule_id: Optional[int]):
-        """Weekly Tab 選取變更"""
-        self._set_selected_schedule_id(schedule_id)
-
-    def _set_selected_schedule_id(self, schedule_id: Optional[int]):
-        self.selected_schedule_id = schedule_id
-        has_selection = schedule_id is not None
-
-        if hasattr(self, 'action_edit'):
-            self.action_edit.setEnabled(has_selection)
-        if hasattr(self, 'action_delete'):
-            self.action_delete.setEnabled(has_selection)
-        if hasattr(self, 'btn_toolbar_edit'):
-            self.btn_toolbar_edit.setEnabled(has_selection)
-        if hasattr(self, 'btn_toolbar_delete'):
-            self.btn_toolbar_delete.setEnabled(has_selection)
-
     def edit_selected_schedule(self):
         """編輯目前選取的排程"""
-        if self.selected_schedule_id is None:
-            QMessageBox.information(self, "提示", "請先選取要編輯的排程")
-            return
-        self.edit_schedule(self.selected_schedule_id)
+        target_id = self.selected_schedule_id
+        if target_id is None:
+            target_id = self._pick_schedule_id("選擇要編輯的排程")
+            if target_id is None:
+                return
+        self.edit_schedule(target_id)
 
     def delete_selected_schedule(self):
         """刪除目前選取的排程"""
-        if self.selected_schedule_id is None:
-            QMessageBox.information(self, "提示", "請先選取要刪除的排程")
-            return
-        self.delete_schedule(self.selected_schedule_id)
+        target_id = self.selected_schedule_id
+        if target_id is None:
+            target_id = self._pick_schedule_id("選擇要刪除的排程")
+            if target_id is None:
+                return
+        self.delete_schedule(target_id)
+
+    def _pick_schedule_id(self, title: str) -> Optional[int]:
+        """從現有排程中挑選一筆 ID。"""
+        if not self.schedules:
+            QMessageBox.information(self, "提示", "目前沒有可操作的排程")
+            return None
+
+        items: List[str] = []
+        mapping: Dict[str, int] = {}
+        for schedule in self.schedules:
+            schedule_id = int(schedule.get("id", 0))
+            task_name = str(schedule.get("task_name", "未命名"))
+            item_text = f"[{schedule_id}] {task_name}"
+            items.append(item_text)
+            mapping[item_text] = schedule_id
+
+        selected_text, ok = QInputDialog.getItem(
+            self,
+            title,
+            "排程:",
+            items,
+            0,
+            False,
+        )
+        if not ok or not selected_text:
+            return None
+
+        return mapping.get(selected_text)
 
     def refresh_schedules(self):
         """重新載入排程資料 (F5)"""
@@ -2078,9 +1545,9 @@ class CalendarUA(QMainWindow):
         <ul>
             <li>週期性排程管理 (RRULE)</li>
             <li>例外與假日支援</li>
-            <li>Day/Week/Month 視圖</li>
+            <li>General / Holidays / Exceptions 分頁</li>
             <li>Category 分類系統</li>
-            <li>Runtime 覆寫控制</li>
+            <li>OPC UA 任務執行與監控</li>
         </ul>
         <br>
         <p>© 2026 CalendarUA Project</p>

@@ -6,12 +6,17 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
     QDialog, QFormLayout, QComboBox, QDateEdit, QLineEdit,
-    QDateTimeEdit, QGroupBox, QRadioButton, QButtonGroup
+    QDateTimeEdit, QGroupBox, QRadioButton, QButtonGroup, QTabBar,
+    QStackedWidget, QToolButton, QMenu, QCalendarWidget, QWidgetAction, QStyle
 )
 from PySide6.QtCore import Qt, Signal, QDate, QDateTime
-from PySide6.QtGui import QColor, QBrush
-from datetime import datetime, date
+from PySide6.QtGui import QColor, QBrush, QIcon, QPainter, QPen, QPixmap
+from datetime import datetime, date, time, timedelta
 from typing import List, Dict, Any, Optional
+
+from core.schedule_resolver import ResolvedOccurrence
+from ui.schedule_canvas import DayViewWidget, WeekViewWidget
+from ui.month_grid import MonthViewWidget
 
 
 class ExceptionEditDialog(QDialog):
@@ -222,27 +227,61 @@ class ExceptionsPanel(QWidget):
         self.db_manager = None
         self.schedules = []
         self.exceptions = []
+        self.filtered_exceptions = []
+        self.current_view_mode = "day"
+        self.reference_date = QDate.currentDate()
         self._init_ui()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        
-        # 頂部工具列
-        toolbar = QHBoxLayout()
-        self.btn_new = QPushButton("新增例外 (New Exception)")
-        self.btn_edit = QPushButton("編輯 (Edit)")
-        self.btn_delete = QPushButton("刪除 (Delete)")
-        self.btn_refresh = QPushButton("重新整理 (Refresh)")
-        
-        toolbar.addWidget(QLabel("例外記錄管理"))
-        toolbar.addStretch()
-        toolbar.addWidget(self.btn_new)
-        toolbar.addWidget(self.btn_edit)
-        toolbar.addWidget(self.btn_delete)
-        toolbar.addWidget(self.btn_refresh)
-        
-        layout.addLayout(toolbar)
-        
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        # Day / Week / Month 與日期控制同列（右上角日期）
+        view_row = QHBoxLayout()
+        view_row.setContentsMargins(4, 2, 4, 0)
+        view_row.setSpacing(4)
+        self.view_tabs = QTabBar()
+        self.view_tabs.addTab("Day")
+        self.view_tabs.addTab("Week")
+        self.view_tabs.addTab("Month")
+        self.view_tabs.setCurrentIndex(0)
+        self.view_tabs.currentChanged.connect(self._on_view_changed)
+        self.label_month_title = QLabel("")
+        self.label_month_title.setStyleSheet("font-family: 'Times New Roman'; font-size: 18px; font-weight: 700; padding-left: 2px;")
+        view_row.addWidget(self.label_month_title)
+        view_row.addStretch()
+        view_row.addWidget(self.view_tabs)
+        view_row.addStretch()
+
+        self.btn_prev_period = QPushButton("<")
+        self.btn_prev_period.setFixedSize(22, 22)
+        self.btn_next_period = QPushButton(">")
+        self.btn_next_period.setFixedSize(22, 22)
+        self.btn_current_period = QPushButton("")
+        self.btn_current_period.setMinimumWidth(140)
+        self.btn_current_period.setFixedHeight(24)
+        self.btn_calendar_popup = QToolButton()
+        self.btn_calendar_popup.setIcon(self._create_calendar_icon())
+        self.btn_calendar_popup.setToolTip("開啟日曆")
+        self.btn_calendar_popup.setFixedSize(24, 22)
+
+        view_row.addWidget(self.btn_current_period)
+        view_row.addWidget(self.btn_prev_period)
+        view_row.addWidget(self.btn_calendar_popup)
+        view_row.addWidget(self.btn_next_period)
+        layout.addLayout(view_row)
+
+        # 日曆視圖區
+        self.calendar_stack = QStackedWidget()
+        self.day_view = DayViewWidget()
+        self.week_view = WeekViewWidget()
+        self.month_view = MonthViewWidget()
+        self.calendar_stack.addWidget(self.day_view)
+        self.calendar_stack.addWidget(self.week_view)
+        self.calendar_stack.addWidget(self.month_view)
+        layout.addWidget(self.calendar_stack)
+
         # 表格
         self.table = QTableWidget()
         self.table.setColumnCount(8)
@@ -256,6 +295,7 @@ class ExceptionsPanel(QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.hide()
         
         layout.addWidget(self.table)
         
@@ -267,14 +307,71 @@ class ExceptionsPanel(QWidget):
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("color: gray; font-size: 10pt; padding: 5px;")
+        info_label.hide()
         layout.addWidget(info_label)
         
         # 訊號
-        self.btn_new.clicked.connect(self._create_exception)
-        self.btn_edit.clicked.connect(self._edit_selected_exception)
-        self.btn_delete.clicked.connect(self._delete_selected_exception)
-        self.btn_refresh.clicked.connect(self.refresh)
         self.table.doubleClicked.connect(self._edit_selected_exception)
+        self.table.itemSelectionChanged.connect(self._update_button_states)
+        self.btn_prev_period.clicked.connect(self._go_previous_period)
+        self.btn_next_period.clicked.connect(self._go_next_period)
+        self.btn_calendar_popup.clicked.connect(self._show_calendar_popup)
+        self.btn_current_period.clicked.connect(self._go_current_period)
+
+        self._update_range_label()
+        self._apply_header_style()
+
+    def _apply_header_style(self):
+        self.view_tabs.setStyleSheet(
+            "QTabBar::tab {"
+            "background: transparent;"
+            "border: none;"
+            "min-width: 62px;"
+            "padding: 1px 8px;"
+            "font-family: 'Times New Roman';"
+            "font-size: 18px;"
+            "font-weight: 600;"
+            "}"
+            "QTabBar::tab:selected {"
+            "border-bottom: 2px solid #d0d0d0;"
+            "}"
+        )
+        button_style = "padding: 0 6px;"
+        self.btn_current_period.setStyleSheet(
+            "padding: 0 8px;"
+            "font-family: 'Times New Roman';"
+            "font-size: 14px;"
+            "font-weight: 700;"
+        )
+        self.btn_prev_period.setStyleSheet(button_style)
+        self.btn_next_period.setStyleSheet(button_style)
+        self.btn_calendar_popup.setStyleSheet(button_style)
+
+    def _create_calendar_icon(self) -> QIcon:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        painter.setPen(QPen(QColor("#8a8f98"), 1))
+        painter.setBrush(QColor("#f4f6f8"))
+        painter.drawRect(1, 2, 14, 13)
+
+        painter.setBrush(QColor("#2f73d9"))
+        painter.drawRect(1, 2, 14, 4)
+
+        painter.setPen(QPen(QColor("#d7e6ff"), 1))
+        painter.drawLine(4, 3, 4, 5)
+        painter.drawLine(11, 3, 11, 5)
+
+        painter.setPen(QPen(QColor("#6d7580"), 1))
+        painter.drawLine(4, 8, 12, 8)
+        painter.drawLine(4, 11, 12, 11)
+        painter.drawLine(6, 7, 6, 13)
+        painter.drawLine(10, 7, 10, 13)
+
+        painter.end()
+        return QIcon(pixmap)
     
     def set_db_manager(self, db_manager):
         """設定資料庫管理器"""
@@ -284,14 +381,306 @@ class ExceptionsPanel(QWidget):
         """載入排程與例外資料"""
         self.schedules = schedules
         self.exceptions = exceptions
+        self._apply_time_filter()
+        self._refresh_calendar_views()
         self._populate_table()
+        self._update_button_states()
     
     def refresh(self):
         """重新整理"""
         if self.db_manager:
             self.schedules = self.db_manager.get_all_schedules()
             self.exceptions = self.db_manager.get_all_schedule_exceptions()
+            self._apply_time_filter()
+            self._refresh_calendar_views()
             self._populate_table()
+            self._update_button_states()
+
+    def _on_view_changed(self, index: int):
+        mode_map = {0: "day", 1: "week", 2: "month"}
+        self.current_view_mode = mode_map.get(index, "day")
+        self.calendar_stack.setCurrentIndex(index if index in (0, 1, 2) else 0)
+        self._update_range_label()
+        self._apply_time_filter()
+        self._refresh_calendar_views()
+        self._populate_table()
+        self._update_button_states()
+
+    def _on_reference_date_changed(self, qdate: QDate):
+        self.reference_date = qdate
+        self._update_range_label()
+        self._apply_time_filter()
+        self._refresh_calendar_views()
+        self._populate_table()
+        self._update_button_states()
+
+    def _apply_reference_date(self, qdate: QDate):
+        self._on_reference_date_changed(qdate)
+
+    def _go_previous_period(self):
+        current = self.reference_date
+        if self.current_view_mode == "day":
+            self._apply_reference_date(current.addDays(-1))
+        elif self.current_view_mode == "week":
+            self._apply_reference_date(current.addDays(-7))
+        else:
+            self._apply_reference_date(current.addMonths(-1))
+
+    def _go_next_period(self):
+        current = self.reference_date
+        if self.current_view_mode == "day":
+            self._apply_reference_date(current.addDays(1))
+        elif self.current_view_mode == "week":
+            self._apply_reference_date(current.addDays(7))
+        else:
+            self._apply_reference_date(current.addMonths(1))
+
+    def _go_current_period(self):
+        current_date = QDate.currentDate()
+        if self.current_view_mode == "month":
+            self._apply_reference_date(QDate(current_date.year(), current_date.month(), 1))
+        else:
+            self._apply_reference_date(current_date)
+
+    def _week_start(self, qdate: QDate) -> QDate:
+        # 以週一為一週起始
+        return qdate.addDays(-(qdate.dayOfWeek() - 1))
+
+    def _update_range_label(self):
+        self.label_month_title.setText(f"{self._month_zh(self.reference_date.month())} {self.reference_date.year()}")
+        if self.current_view_mode == "day":
+            self.btn_current_period.setText("Current Day")
+        elif self.current_view_mode == "week":
+            self.btn_current_period.setText("Current Week")
+        else:
+            self.btn_current_period.setText("Current Month")
+
+    def _month_zh(self, month: int) -> str:
+        months = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"]
+        if 1 <= month <= 12:
+            return months[month - 1]
+        return str(month)
+
+    def _show_calendar_popup(self):
+        popup_menu = QMenu(self)
+
+        container = QWidget(popup_menu)
+        root_layout = QVBoxLayout(container)
+        root_layout.setContentsMargins(6, 6, 6, 6)
+        root_layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+
+        btn_prev = QToolButton(container)
+        btn_prev.setText("◀")
+        btn_prev.setAutoRaise(True)
+
+        btn_month = QToolButton(container)
+        btn_month.setPopupMode(QToolButton.InstantPopup)
+        btn_month.setToolButtonStyle(Qt.ToolButtonTextOnly)
+
+        btn_year = QToolButton(container)
+        btn_year.setPopupMode(QToolButton.InstantPopup)
+        btn_year.setToolButtonStyle(Qt.ToolButtonTextOnly)
+
+        btn_next = QToolButton(container)
+        btn_next.setText("▶")
+        btn_next.setAutoRaise(True)
+
+        header.addWidget(btn_prev)
+        header.addStretch()
+        header.addWidget(btn_month)
+        header.addWidget(btn_year)
+        header.addStretch()
+        header.addWidget(btn_next)
+        root_layout.addLayout(header)
+
+        mini_calendar = QCalendarWidget(container)
+        mini_calendar.setGridVisible(True)
+        mini_calendar.setSelectedDate(self.reference_date)
+        mini_calendar.setFirstDayOfWeek(Qt.Monday)
+        mini_calendar.setNavigationBarVisible(False)
+        mini_calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        mini_calendar.setCurrentPage(self.reference_date.year(), self.reference_date.month())
+        root_layout.addWidget(mini_calendar)
+
+        def update_header(year: int, month: int):
+            btn_month.setText(self._month_zh(month))
+            btn_year.setText(str(year))
+
+        def shift_month(delta: int):
+            year = mini_calendar.yearShown()
+            month = mini_calendar.monthShown()
+            new_month = month + delta
+            new_year = year
+            if new_month < 1:
+                new_month = 12
+                new_year -= 1
+            elif new_month > 12:
+                new_month = 1
+                new_year += 1
+            mini_calendar.setCurrentPage(new_year, new_month)
+
+        def show_month_picker():
+            menu = QMenu(btn_month)
+            for month in range(1, 13):
+                action = menu.addAction(self._month_zh(month))
+                action.triggered.connect(
+                    lambda checked=False, m=month: mini_calendar.setCurrentPage(mini_calendar.yearShown(), m)
+                )
+            menu.exec(btn_month.mapToGlobal(btn_month.rect().bottomLeft()))
+
+        def show_year_picker():
+            menu = QMenu(btn_year)
+            current_year = mini_calendar.yearShown()
+            start_year = current_year - (current_year % 12)
+            years = list(range(start_year, start_year + 12))
+
+            grid_container = QWidget(menu)
+            grid_layout = QVBoxLayout(grid_container)
+            grid_layout.setContentsMargins(4, 4, 4, 4)
+            grid_layout.setSpacing(2)
+
+            for row_idx in range(3):
+                row = QHBoxLayout()
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(2)
+                for col_idx in range(4):
+                    year = years[row_idx * 4 + col_idx]
+                    year_btn = QPushButton(str(year), grid_container)
+                    year_btn.setFixedSize(52, 24)
+                    if year == current_year:
+                        year_btn.setStyleSheet("font-weight: bold;")
+                    year_btn.clicked.connect(
+                        lambda checked=False, y=year: (
+                            mini_calendar.setCurrentPage(y, mini_calendar.monthShown()),
+                            menu.close(),
+                        )
+                    )
+                    row.addWidget(year_btn)
+                grid_layout.addLayout(row)
+
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(grid_container)
+            menu.addAction(action)
+            menu.exec(btn_year.mapToGlobal(btn_year.rect().bottomLeft()))
+
+        btn_prev.clicked.connect(lambda: shift_month(-1))
+        btn_next.clicked.connect(lambda: shift_month(1))
+        btn_month.clicked.connect(show_month_picker)
+        btn_year.clicked.connect(show_year_picker)
+        mini_calendar.currentPageChanged.connect(update_header)
+        mini_calendar.clicked.connect(lambda qdate: (self._apply_reference_date(qdate), popup_menu.close()))
+
+        update_header(mini_calendar.yearShown(), mini_calendar.monthShown())
+
+        action = QWidgetAction(popup_menu)
+        action.setDefaultWidget(container)
+        popup_menu.addAction(action)
+        popup_menu.exec(self.btn_calendar_popup.mapToGlobal(self.btn_calendar_popup.rect().bottomLeft()))
+
+    def _apply_time_filter(self):
+        """依 Day/Week/Month 篩選例外清單。"""
+        filtered = []
+
+        week_start = self._week_start(self.reference_date)
+        week_end = week_start.addDays(6)
+
+        for exc in self.exceptions:
+            occ_str = str(exc.get("occurrence_date", "")).strip()
+            try:
+                occ = datetime.strptime(occ_str, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            occ_qdate = QDate(occ.year, occ.month, occ.day)
+
+            if self.current_view_mode == "day":
+                if occ_qdate == self.reference_date:
+                    filtered.append(exc)
+            elif self.current_view_mode == "week":
+                if week_start <= occ_qdate <= week_end:
+                    filtered.append(exc)
+            else:
+                if occ_qdate.year() == self.reference_date.year() and occ_qdate.month() == self.reference_date.month():
+                    filtered.append(exc)
+
+        self.filtered_exceptions = filtered
+
+    def _build_calendar_occurrences(self) -> List[ResolvedOccurrence]:
+        """把目前篩選後的例外記錄轉為日曆可顯示的 occurrence。"""
+        schedule_map = {s.get("id"): s.get("task_name", "未命名排程") for s in self.schedules}
+        result: List[ResolvedOccurrence] = []
+
+        for exc in self.filtered_exceptions:
+            exc_id = int(exc.get("id", 0))
+            schedule_id = int(exc.get("schedule_id", 0))
+            action = str(exc.get("action", "")).strip().lower()
+            occ_date_str = str(exc.get("occurrence_date", "")).strip()
+            if not occ_date_str:
+                continue
+
+            try:
+                occ_date = datetime.strptime(occ_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            title_base = str(schedule_map.get(schedule_id, f"ID={schedule_id}"))
+            if action == "cancel":
+                title = f"{title_base} (取消)"
+                start_dt = datetime.combine(occ_date, time(8, 0))
+                end_dt = start_dt + timedelta(hours=1)
+                bg = "#c0392b"
+            else:
+                title = str(exc.get("override_task_name") or f"{title_base} (覆寫)")
+                start_raw = exc.get("override_start")
+                end_raw = exc.get("override_end")
+                try:
+                    start_dt = datetime.fromisoformat(str(start_raw)) if start_raw else datetime.combine(occ_date, time(8, 0))
+                except Exception:
+                    start_dt = datetime.combine(occ_date, time(8, 0))
+                try:
+                    end_dt = datetime.fromisoformat(str(end_raw)) if end_raw else (start_dt + timedelta(hours=1))
+                except Exception:
+                    end_dt = start_dt + timedelta(hours=1)
+                if end_dt <= start_dt:
+                    end_dt = start_dt + timedelta(hours=1)
+                bg = "#1f6fd6"
+
+            target_value = str(exc.get("override_target_value") or action or "exception")
+            result.append(
+                ResolvedOccurrence(
+                    schedule_id=schedule_id,
+                    source="exception",
+                    title=title,
+                    start=start_dt,
+                    end=end_dt,
+                    category_bg=bg,
+                    category_fg="#ffffff",
+                    target_value=target_value,
+                    is_exception=True,
+                    is_holiday=False,
+                    occurrence_key=f"exception-{exc_id}",
+                )
+            )
+
+        return result
+
+    def _refresh_calendar_views(self):
+        """同步更新 Day/Week/Month 日曆內容。"""
+        occurrences = self._build_calendar_occurrences()
+
+        self.day_view.set_reference_date(self.reference_date)
+        self.day_view.set_occurrences(occurrences)
+
+        self.week_view.set_reference_date(self.reference_date)
+        self.week_view.set_occurrences(occurrences)
+
+        self.month_view.set_reference_date(self.reference_date)
+        self.month_view.set_selected_date(self.reference_date)
+        self.month_view.set_occurrences(occurrences)
     
     def _populate_table(self):
         """填充表格"""
@@ -300,7 +689,7 @@ class ExceptionsPanel(QWidget):
         # 建立 schedule_id -> task_name 映射
         schedule_map = {s.get("id"): s.get("task_name", "未知") for s in self.schedules}
         
-        for exc in self.exceptions:
+        for exc in self.filtered_exceptions:
             row = self.table.rowCount()
             self.table.insertRow(row)
             
@@ -349,6 +738,10 @@ class ExceptionsPanel(QWidget):
             self.table.setItem(row, 7, QTableWidgetItem(created_at))
         
         self.table.resizeColumnsToContents()
+
+    def _update_button_states(self):
+        """依據資料與選取狀態更新按鈕可用性。"""
+        return
     
     def _create_exception(self):
         """建立新例外"""
