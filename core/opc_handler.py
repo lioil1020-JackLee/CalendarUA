@@ -467,136 +467,71 @@ class OPCHandler:
 
     async def read_node_data_type(self, node_id: str) -> Optional[str]:
         """
-        讀取指定 Node 的資料型別
-        
-        Args:
-            node_id: OPC UA Node ID
-            
-        Returns:
-            Optional[str]: 資料型別 (int/float/string/bool/auto)，失敗回傳 None
+        讀取指定 Node 的資料型別。
+
+        回傳值為簡化後型別字串："int" / "float" / "string" / "bool" / "auto"。
         """
         if not self.is_connected or not self.client:
+            logger.error("尚未連線到 OPC UA 伺服器")
             return None
-        
+
         try:
             node = self.client.get_node(node_id)
-            
-            # 方法1：讀取 DataType 屬性並解析型別名稱
+
+            # 優先使用 VariantType
+            try:
+                from asyncua.ua import VariantType
+
+                variant_type = await node.read_data_type_as_variant_type()
+                return self._map_variant_type_to_simple_type(variant_type)
+            except Exception:
+                pass
+
+            # 後備方案：讀 DataType Node 名稱
             try:
                 data_type_nodeid = await node.read_data_type()
                 data_type_node = self.client.get_node(data_type_nodeid)
                 browse_name = await data_type_node.read_browse_name()
                 type_name = browse_name.Name
-                
-                # 根據 OPC UA 標準型別名稱映射
-                result = self._map_data_type_name_to_simple_type(type_name)
-                if result != "auto":  # 如果不是複雜型別，返回結果
-                    return result
+                return self._map_data_type_name_to_simple_type(type_name)
             except Exception:
                 pass
-            
-            # 方法2：使用 read_data_type_as_variant_type
-            try:
-                variant_type = await node.read_data_type_as_variant_type()
-                return self._map_variant_type_to_simple_type(variant_type)
-            except Exception:
-                pass
-                
-            return "auto"  # 如果都失敗，使用auto
+
+            return "auto"
         except Exception as e:
             logger.error(f"讀取 Node {node_id} 資料型別失敗: {e}")
             return None
 
     def _map_data_type_name_to_simple_type(self, type_name: str) -> str:
-        """
-        將 OPC UA 資料型別名稱對應到簡單型別系統
-        
-        Args:
-            type_name: OPC UA 資料型別名稱 (如 "Float", "Double", "Int32"等)
-            
-        Returns:
-            str: 簡單型別 (int/float/string/bool/auto)
-        """
-        # 浮點數型別
+        """將 OPC UA 型別名稱對應到簡單型別。"""
         if type_name in ("Float", "Double"):
             return "float"
-        
-        # 整數型別
-        elif type_name in ("SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64"):
+        if type_name in ("SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64"):
             return "int"
-        
-        # 字串型別
-        elif type_name in ("String", "LocalizedText"):
+        if type_name in ("String", "LocalizedText"):
             return "string"
-        
-        # 布林型別
-        elif type_name == "Boolean":
+        if type_name == "Boolean":
             return "bool"
-        
-        # 其他型別
-        else:
-            # 對於未知的複雜型別，使用auto讓系統自動處理
-            return "auto"
+        return "auto"
 
-    def _map_variant_type_to_simple_type(self, variant_type) -> str:
-        """
-        將 OPC UA VariantType 對應到簡單型別系統
-        
-        Args:
-            variant_type: asyncua.ua.VariantType 列舉值
-            
-        Returns:
-            str: 簡單型別 (int/float/string/bool/auto)
-        """
-        from asyncua.ua import VariantType
-        
-        # 浮點數型別
-        if variant_type in (VariantType.Float, VariantType.Double):
+    def _map_variant_type_to_simple_type(self, variant_type: ua.VariantType) -> str:
+        """將 VariantType 對應到簡單型別。"""
+        int_types = {
+            ua.VariantType.SByte,
+            ua.VariantType.Byte,
+            ua.VariantType.Int16,
+            ua.VariantType.UInt16,
+            ua.VariantType.Int32,
+            ua.VariantType.UInt32,
+            ua.VariantType.Int64,
+            ua.VariantType.UInt64,
+        }
+        if variant_type in int_types:
+            return "int"
+        if variant_type in (ua.VariantType.Float, ua.VariantType.Double):
             return "float"
-        
-        # 整數型別
-        elif variant_type in (VariantType.SByte, VariantType.Byte, VariantType.Int16, 
-                             VariantType.UInt16, VariantType.Int32, VariantType.UInt32, 
-                             VariantType.Int64, VariantType.UInt64):
-            return "int"
-        
-        # 字串型別
-        elif variant_type in (VariantType.String, VariantType.LocalizedText):
+        if variant_type in (ua.VariantType.String, ua.VariantType.LocalizedText):
             return "string"
-        
-        # 布林型別
-        elif variant_type == VariantType.Boolean:
+        if variant_type == ua.VariantType.Boolean:
             return "bool"
-        
-        # 其他型別
-        else:
-            # 對於未知的複雜型別，使用auto讓系統自動處理
-            return "auto"
-
-
-# 使用範例
-async def main():
-    """測試範例"""
-    opc_url = os.environ.get("OPC_DEFAULT_URL", "opc.tcp://localhost:4840")
-
-    async with OPCHandler(opc_url) as handler:
-        if handler.is_connected:
-            # 寫入數值
-            success = await handler.write_node("ns=2;i=1001", "1", "auto")
-            print(f"寫入結果: {success}")
-
-            # 讀取數值
-            value = await handler.read_node("ns=2;i=1001")
-            print(f"讀取數值: {value}")
-
-            # 讀取資料型別
-            data_type = await handler.read_node_data_type("ns=2;i=1001")
-            print(f"讀取資料型別: {data_type}")
-
-            # 瀏覽節點
-            nodes = await handler.browse_nodes()
-            print(f"可用節點: {nodes}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        return "auto"

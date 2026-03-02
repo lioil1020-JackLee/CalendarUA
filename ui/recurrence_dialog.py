@@ -53,9 +53,17 @@ class RecurrenceDialog(QDialog):
 
     rrule_created = Signal(str)
 
-    def __init__(self, parent=None, current_rrule: str = ""):
+    def __init__(
+        self,
+        parent=None,
+        current_rrule: str = "",
+        initial_date: QDate | None = None,
+        initial_time: QTime | None = None,
+    ):
         super().__init__(parent)
         self.current_rrule = current_rrule
+        self.initial_date: QDate | None = initial_date
+        self.initial_time: QTime | None = initial_time
         self.setWindowTitle("週期性約會")
         self.setWindowIcon(get_app_icon())
         self.setMinimumWidth(570)
@@ -84,17 +92,21 @@ class RecurrenceDialog(QDialog):
 
     def set_default_times(self):
         """設置預設時間"""
-        # 設置為離目前系統時間最接近的時間，但要大於目前系統時間
-        current_time = QTime.currentTime()
-        # 將分鐘向上取整到最近的 30 分鐘
-        minute = ((current_time.minute() + 29) // 30) * 30
-        if minute >= 60:
-            minute = 0
-            hour = (current_time.hour() + 1) % 24
+        if self.initial_time is not None:
+            default_start_time = self.initial_time
         else:
-            hour = current_time.hour()
-        
-        default_start_time = QTime(hour, minute, 0)
+            # 設置為離目前系統時間最接近的時間，但要大於目前系統時間
+            current_time = QTime.currentTime()
+            # 將分鐘向上取整到最近的 30 分鐘
+            minute = ((current_time.minute() + 29) // 30) * 30
+            if minute >= 60:
+                minute = 0
+                hour = (current_time.hour() + 1) % 24
+            else:
+                hour = current_time.hour()
+
+            default_start_time = QTime(hour, minute, 0)
+
         self.start_time_edit.setTime(default_start_time)
 
     def setup_ui(self):
@@ -247,15 +259,19 @@ class RecurrenceDialog(QDialog):
                 self.yearly_interval.setValue(interval)
 
             # 設置開始時間
-            byhour = params.get("BYHOUR")
-            byminute = params.get("BYMINUTE", "0")
-            if byhour:
-                hour = int(byhour)
-                minute = int(byminute)
-                start_time = QTime(hour, minute, 0)
+            # 若呼叫方有提供 initial_time（例如從主行事曆指定的格子），優先使用該時間，避免與行事曆顯示不一致
+            if self.initial_time is not None:
+                start_time = self.initial_time
             else:
-                # 如果沒有 BYHOUR，使用預設時間 (上午9:00)
-                start_time = QTime(9, 0, 0)
+                byhour = params.get("BYHOUR")
+                byminute = params.get("BYMINUTE", "0")
+                if byhour:
+                    hour = int(byhour)
+                    minute = int(byminute)
+                    start_time = QTime(hour, minute, 0)
+                else:
+                    # 如果沒有 BYHOUR，使用預設時間 (上午9:00)
+                    start_time = QTime(9, 0, 0)
             # 設置開始時間
             self.start_time_edit.setTime(start_time)
 
@@ -735,7 +751,7 @@ class RecurrenceDialog(QDialog):
         layout.addWidget(start_date_label, 0, 0)
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setDisplayFormat("yyyy/M/d (ddd)")
-        self.start_date_edit.setDate(QDate.currentDate())
+        self.start_date_edit.setDate(self.initial_date or QDate.currentDate())
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setFixedWidth(150)
         layout.addWidget(self.start_date_edit, 0, 1)
@@ -1350,18 +1366,25 @@ class RecurrenceDialog(QDialog):
         return super().eventFilter(obj, event)
 
 
-def show_recurrence_dialog(parent=None, current_rrule: str = "") -> str:
+def show_recurrence_dialog(
+    parent=None,
+    current_rrule: str = "",
+    initial_date: QDate | None = None,
+    initial_time: QTime | None = None,
+) -> str:
     """
     顯示週期性設定對話框並返回 RRULE 字串
 
     Args:
         parent: 父視窗
         current_rrule: 現有的 RRULE 字串（可選，用於編輯）
+        initial_date: 建議的開始日期（例如從主行事曆點選的日期）
+        initial_time: 建議的開始時間
 
     Returns:
         str: RRULE 字串，使用者取消則返回空字串
     """
-    dialog = RecurrenceDialog(parent, current_rrule)
+    dialog = RecurrenceDialog(parent, current_rrule, initial_date, initial_time)
     if dialog.exec() == QDialog.Accepted:
         return dialog.get_rrule()
     return ""

@@ -40,14 +40,18 @@ class ScheduleTimeGridWidget(QWidget):
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
+        # 支援滑鼠左鍵雙擊：直接開啟編輯 / 新增視窗
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.horizontalHeader().setFixedHeight(34)
+        self.table.horizontalHeader().setFixedHeight(32)
         self.table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
-        self.table.horizontalHeader().setStyleSheet("QHeaderView::section { padding: 0px 2px; font-family: 'Times New Roman'; font-weight: 700; }")
+        self.table.horizontalHeader().setStyleSheet(
+            "QHeaderView::section { padding: 0px 4px; font-family: 'Segoe UI'; font-weight: 600; }"
+        )
         header_font = QFont(self.table.horizontalHeader().font())
-        header_font.setFamily("Times New Roman")
-        header_font.setPointSize(14)
+        header_font.setFamily("Segoe UI")
+        header_font.setPointSize(10)
         header_font.setBold(True)
         self.table.horizontalHeader().setFont(header_font)
 
@@ -167,55 +171,49 @@ class ScheduleTimeGridWidget(QWidget):
 
         menu = QMenu(self)
 
-        open_action = menu.addAction("Open")
-        delete_action = menu.addAction("Delete")
+        new_action = menu.addAction("新增行程 (New Appointment)")
+        edit_action = menu.addAction("編輯行程 (Edit)")
+        delete_action = menu.addAction("刪除行程 (Delete)")
         menu.addSeparator()
-        new_action = menu.addAction("New Event")
-        copy_action = menu.addAction("Copy")
-        cut_action = menu.addAction("Cut")
-        paste_action = menu.addAction("Paste")
-
-        time_scale_menu = menu.addMenu("Time Scale")
-        scale_30 = time_scale_menu.addAction("30 min")
-        scale_60 = time_scale_menu.addAction("60 min")
-        scale_120 = time_scale_menu.addAction("120 min")
-
-        menu.addSeparator()
-        refresh_action = menu.addAction("Refresh Schedule")
-        apply_action = menu.addAction("Apply Schedule")
+        today_action = menu.addAction("移至今天 (Go to Today)")
+        refresh_action = menu.addAction("重新整理 (Refresh)")
 
         has_event = schedule_id is not None
-        open_action.setEnabled(has_event)
+        edit_action.setEnabled(has_event)
         delete_action.setEnabled(has_event)
-        copy_action.setEnabled(has_event)
-        cut_action.setEnabled(has_event)
 
         selected_action = menu.exec(self.table.viewport().mapToGlobal(position))
         if selected_action is None:
             return
 
-        if selected_action == open_action:
-            self.context_action_requested.emit("open", payload)
+        if selected_action == new_action:
+            self.context_action_requested.emit("new", payload)
+        elif selected_action == edit_action:
+            self.context_action_requested.emit("edit", payload)
         elif selected_action == delete_action:
             self.context_action_requested.emit("delete", payload)
-        elif selected_action == new_action:
-            self.context_action_requested.emit("new", payload)
-        elif selected_action == copy_action:
-            self.context_action_requested.emit("copy", payload)
-        elif selected_action == cut_action:
-            self.context_action_requested.emit("cut", payload)
-        elif selected_action == paste_action:
-            self.context_action_requested.emit("paste", payload)
+        elif selected_action == today_action:
+            self.context_action_requested.emit("today", payload)
         elif selected_action == refresh_action:
             self.context_action_requested.emit("refresh", payload)
-        elif selected_action == apply_action:
-            self.context_action_requested.emit("apply", payload)
-        elif selected_action == scale_30:
-            self.context_action_requested.emit("time_scale", {**payload, "minutes": 30})
-        elif selected_action == scale_60:
-            self.context_action_requested.emit("time_scale", {**payload, "minutes": 60})
-        elif selected_action == scale_120:
-            self.context_action_requested.emit("time_scale", {**payload, "minutes": 120})
+
+    def _on_cell_double_clicked(self, row: int, col: int):
+        """滑鼠左鍵雙擊：若有行程則編輯，否則新增。"""
+        occurrence = self._cell_occurrence_map.get((row, col))
+        schedule_id = occurrence.schedule_id if occurrence else None
+        date_text = self._date_for_column(col).toString("yyyy-MM-dd")
+
+        payload = {
+            "schedule_id": schedule_id,
+            "date": date_text,
+            "hour": row,
+            "week_mode": self.week_mode,
+        }
+
+        if schedule_id is not None:
+            self.context_action_requested.emit("edit", payload)
+        else:
+            self.context_action_requested.emit("new", payload)
 
     def _render(self):
         self._ensure_items()

@@ -52,20 +52,23 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QStackedWidget,
     QDateEdit,
+    QToolButton,
+    QTableView,
+    QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize
-from PySide6.QtGui import QAction, QColor, QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QEvent, QLocale
+from PySide6.QtGui import QAction, QColor, QIcon, QTextCharFormat
 import qasync
 import re
 
 from database.sqlite_manager import SQLiteManager
 from core.opc_handler import OPCHandler
 from core.rrule_parser import RRuleParser
+from core.schedule_resolver import resolve_occurrences_for_range
 from ui.recurrence_dialog import RecurrenceDialog, show_recurrence_dialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
-from ui.exceptions_panel import ExceptionsPanel
-from ui.holidays_panel import HolidaysPanel
-from ui.general_panel import GeneralPanel
+from ui.schedule_canvas import DayViewWidget, WeekViewWidget
+from ui.month_grid import MonthViewWidget
 
 
 def get_app_icon():
@@ -89,6 +92,102 @@ def get_app_icon():
 
     # 預設圖示
     return QIcon()
+
+
+class NavCalendarWidget(QCalendarWidget):
+    """
+    導覽用小月曆（完全自繪 + 自行管理選取）。
+
+    - role = "top"：顯示目前月份，隱藏「下個月」銜接格，並管理選取
+    - role = "bottom"：顯示下一月份，隱藏「上個月」銜接格（純預覽，不選取）
+    """
+
+    date_clicked = Signal(QDate)  # 對外統一用這個訊號回報點擊日期
+
+    def __init__(self, role: str, parent=None):
+        super().__init__(parent)
+        self.role = role  # "top" or "bottom"
+        self._forced_selected_date: QDate | None = None  # 自行管理的選取日期
+
+        # 使用 Qt 內建 clicked(QDate) 訊號，不再自己做 hit-test
+        self.clicked.connect(self._on_qt_clicked)
+
+    def set_forced_selected_date(self, date: QDate):
+        """由外部設定目前選取日期（兩個小月曆共用同一個選取日期）"""
+        self._forced_selected_date = date
+        self.update()
+
+    def _on_qt_clicked(self, clicked: QDate):
+        """由 Qt 傳入正確的 clicked 日期，再套用我們的隱藏/跨月規則。"""
+        shown_year = self.yearShown()
+        shown_month = self.monthShown()
+        first = QDate(shown_year, shown_month, 1)
+        prev_month = first.addMonths(-1)
+        next_month = first.addMonths(1)
+
+        is_prev = (clicked.year() == prev_month.year() and clicked.month() == prev_month.month())
+        is_this = (clicked.year() == shown_year and clicked.month() == shown_month)
+        is_next = (clicked.year() == next_month.year() and clicked.month() == next_month.month())
+
+        # 對應 paintCell 的「隱藏交界格」規則：這些格子應該完全無效
+        hide = False
+        if self.role == "top" and is_next:
+            hide = True      # 上方隱藏「下個月」交界格
+        if self.role == "bottom" and is_prev:
+            hide = True      # 下方隱藏「上個月」交界格
+
+        if hide:
+            return
+
+        # 其餘日期（本月白字 + 合法淺灰）都視為有效點擊
+        self._forced_selected_date = clicked
+        self.update()
+        self.date_clicked.emit(clicked)
+
+    def paintCell(self, painter, rect, date):
+        shown_year = self.yearShown()
+        shown_month = self.monthShown()
+        first = QDate(shown_year, shown_month, 1)
+        prev_month = first.addMonths(-1)
+        next_month = first.addMonths(1)
+
+        is_prev = (date.year() == prev_month.year() and date.month() == prev_month.month())
+        is_this = (date.year() == shown_year and date.month() == shown_month)
+        is_next = (date.year() == next_month.year() and date.month() == next_month.month())
+
+        painter.save()
+        # 底色
+        painter.fillRect(rect, self.palette().base())
+
+        # 決定這格是否完全不顯示（空白）
+        hide = False
+        if self.role == "top" and is_next:
+            hide = True      # 上方隱藏「下個月」交界格
+        if self.role == "bottom" and is_prev:
+            hide = True      # 下方隱藏「上個月」交界格
+
+        from PySide6.QtGui import QColor
+
+        if not hide:
+            # 本月白字、前後月灰字
+            if is_this:
+                fg = QColor("#f0f0f0")
+            else:
+                fg = QColor("#808080")
+            painter.setPen(fg)
+            painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+
+        # 畫選取高亮（兩個小月曆共用同一個選取日期；但隱藏格不畫）
+        if (not hide) and self._forced_selected_date and date == self._forced_selected_date:
+            sel = QColor("#0078d7")
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(sel)
+            r = rect.adjusted(2, 2, -2, -2)
+            painter.drawRect(r)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+
+        painter.restore()
 
 
 class SchedulerWorker(QThread):
@@ -165,6 +264,11 @@ class CalendarUA(QMainWindow):
         self.db_manager: Optional[SQLiteManager] = None
         self.scheduler_worker: Optional[SchedulerWorker] = None
         self.schedules: List[Dict[str, Any]] = []
+        self.schedule_exceptions: List[Dict[str, Any]] = []
+        self.holiday_entries: List[Dict[str, Any]] = []
+        # 主行事曆視圖狀態
+        self.current_view_mode: str = "month"
+        self.reference_date: QDate = QDate.currentDate()
         
         # 執行計數器：schedule_id -> 已執行次數
         self.execution_counts: Dict[int, int] = {}
@@ -215,39 +319,222 @@ class CalendarUA(QMainWindow):
         self.status_bar.showMessage("就緒")
 
     def create_main_panel(self) -> QWidget:
-        """建立主要內容面板（全寬顯示三個 Tab）"""
+        """建立主要內容面板（模仿 Outlook 行事曆版面）"""
         panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
+        root_layout = QHBoxLayout(panel)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        # 減少左右區塊間距，避免中間有明顯空白
+        root_layout.setSpacing(4)
 
-        # Tab 系統
-        self.schedule_tabs = QTabWidget()
+        # 左側：導覽月曆 + 行事曆清單
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        # 讓「上一月/月份/年份/下一月」這一排和月曆本體緊貼在一起
+        left_layout.setSpacing(0)
 
-        # Exceptions Tab - 例外記錄管理
-        self.exceptions_panel = ExceptionsPanel()
-        self.exceptions_panel.exception_changed.connect(self.load_schedules)
-        self.schedule_tabs.addTab(self.exceptions_panel, "Exceptions")
-        
-        # General Tab - 全局設定
- 
-        self.general_panel = GeneralPanel()
-        self.general_panel.settings_changed.connect(self._on_general_settings_changed)
-        self.schedule_tabs.addTab(self.general_panel, "General")
-        
-        # Holidays Tab - 假日管理
-        self.holidays_panel = HolidaysPanel()
-        self.holidays_panel.holiday_changed.connect(self.load_schedules)
-        self.schedule_tabs.addTab(self.holidays_panel, "Holidays")
+        # 導覽月份標頭：上一月 / 月份下拉 / 年份下拉 / 下一月
+        header_layout = QHBoxLayout()
+        # 略留左右 2px，移除額外間距，讓整排元素緊湊
+        header_layout.setContentsMargins(2, 0, 2, 0)
+        header_layout.setSpacing(0)
 
-        self.schedule_tabs.setCurrentIndex(0)
-        layout.addWidget(self.schedule_tabs)
+        # 使用與 QCalendarWidget 導覽列相似的 QToolButton 圖示，但放大圖示尺寸，增加點擊區
+        self.btn_nav_prev = QToolButton()
+        self.btn_nav_prev.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.btn_nav_prev.setAutoRaise(True)
+        self.btn_nav_prev.setIconSize(QSize(18, 18))
+        # 稍微縮窄，避免與「今日」與年份重疊
+        self.btn_nav_prev.setFixedWidth(26)
+
+        self.btn_nav_next = QToolButton()
+        self.btn_nav_next.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.btn_nav_next.setAutoRaise(True)
+        self.btn_nav_next.setIconSize(QSize(18, 18))
+        self.btn_nav_next.setFixedWidth(26)
+
+        self.combo_nav_month = QComboBox()
+        self.combo_nav_year = QComboBox()
+        # 稍微縮短下拉寬度，避免與右側箭頭重疊，並統一字體大小
+        self.combo_nav_month.setFixedWidth(60)
+        # 年度需要完整顯示四位數，略放寬寬度，但避免與「今日」重疊
+        self.combo_nav_year.setFixedWidth(72)
+        common_combo_style = "font-family: 'Segoe UI'; font-size: 16px;"
+        self.combo_nav_month.setStyleSheet(common_combo_style)
+        self.combo_nav_year.setStyleSheet(common_combo_style)
+
+        # 今日按鈕（使用符號，縮小尺寸，避免套用全域 QPushButton 樣式變成大藍塊）
+        self.btn_nav_today = QToolButton()
+        self.btn_nav_today.setText("●")
+        self.btn_nav_today.setAutoRaise(True)
+        self.btn_nav_today.setFixedSize(22, 22)
+        self.btn_nav_today.setToolTip("跳到今天")
+
+        # 兩側各加一個 stretch，讓「上一月 2026 今日 3月 下一月」這組元件整體置中
+        header_layout.addStretch()
+        header_layout.addWidget(self.btn_nav_prev)
+        header_layout.addWidget(self.combo_nav_year)
+        header_layout.addWidget(self.btn_nav_today)
+        header_layout.addWidget(self.combo_nav_month)
+        header_layout.addWidget(self.btn_nav_next)
+        header_layout.addStretch()
+        left_layout.addLayout(header_layout)
+
+        # 左上：目前月份導覽月曆
+        self.nav_calendar = NavCalendarWidget(role="top")
+        self.nav_calendar.setGridVisible(True)
+        self.nav_calendar.setFirstDayOfWeek(Qt.Sunday)
+        self.nav_calendar.setLocale(QLocale(QLocale.Chinese, QLocale.Taiwan))
+        self.nav_calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.nav_calendar.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
+        self.nav_calendar.setFixedWidth(220)
+        # 統一週一~週日表頭底色，與下方預覽一致
+        self.nav_calendar.setStyleSheet(
+            """
+            QCalendarWidget QWidget {
+                background-color: #2b2b2b;
+                color: #f0f0f0;
+            }
+            QCalendarWidget QAbstractItemView:enabled {
+                selection-background-color: #0078d7;
+                selection-color: #ffffff;
+                background-color: #2b2b2b;
+                color: #f0f0f0;
+            }
+            QCalendarWidget QToolButton {
+                color: #f0f0f0;
+                background-color: transparent;
+                border: none;
+            }
+            QCalendarWidget QTableView QHeaderView::section {
+                background-color: #363636;
+                color: #f0f0f0;
+                font-weight: 600;
+            }
+            """
+        )
+        self.nav_calendar.setNavigationBarVisible(False)
+        left_layout.addWidget(self.nav_calendar)
+
+        # 左下標題：顯示下一個月的「年 / 月」文字（不使用下拉）
+        self.label_nav_next_header = QLabel("")
+        self.label_nav_next_header.setAlignment(Qt.AlignCenter)
+        self.label_nav_next_header.setStyleSheet(
+            "font-family: 'Segoe UI'; font-size: 16px; font-weight: 600; color: #f0f0f0;"
+        )
+        left_layout.addWidget(self.label_nav_next_header)
+
+        # 左下：下一個月預覽（僅顯示）
+        self.nav_calendar_next = NavCalendarWidget(role="bottom")
+        self.nav_calendar_next.setGridVisible(True)
+        self.nav_calendar_next.setFirstDayOfWeek(Qt.Sunday)
+        self.nav_calendar_next.setLocale(QLocale(QLocale.Chinese, QLocale.Taiwan))
+        self.nav_calendar_next.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.nav_calendar_next.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
+        self.nav_calendar_next.setFixedWidth(220)
+        # 保持啟用狀態，才能正確套用每一天的文字格式；不接任何訊號，因此點擊不會影響主程式
+        self.nav_calendar_next.setStyleSheet(self.nav_calendar.styleSheet())
+        self.nav_calendar_next.setNavigationBarVisible(False)
+        left_layout.addWidget(self.nav_calendar_next)
+
+        # 讓左側整個區塊寬度與月曆一致，不再比行事曆寬
+        left_widget.setFixedWidth(220)
+
+        root_layout.addWidget(left_widget, 0)
+
+        # 右側：視圖切換列 + Day/Week/Month 主視圖
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        # 讓標題列與行事曆視圖之間緊貼，消除中間大塊空白
+        right_layout.setSpacing(0)
+
+        # 視圖切換工具列（左：Category / 主視圖上一段/下一段；中：目前範圍；右：日/週/月）
+        view_toolbar = QHBoxLayout()
+        view_toolbar.setContentsMargins(4, 0, 4, 0)
+        view_toolbar.setSpacing(4)
+
+        # Category 管理按鈕（放在右側視窗標題列左側）
+        self.btn_view_categories = QPushButton("分類")
+        self.btn_view_categories.setFixedWidth(72)
+
+        # 主視圖上一段 / 下一段按鈕
+        self.btn_main_prev = QToolButton()
+        self.btn_main_prev.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.btn_main_prev.setAutoRaise(True)
+        self.btn_main_prev.setIconSize(QSize(18, 18))
+
+        self.btn_main_next = QToolButton()
+        self.btn_main_next.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.btn_main_next.setAutoRaise(True)
+        self.btn_main_next.setIconSize(QSize(18, 18))
+
+        self.label_current_range = QLabel("")
+        self.label_current_range.setStyleSheet(
+            "font-family: 'Segoe UI'; font-size: 16px; font-weight: 600;"
+        )
+        # 讓「分類 / 上一段 / 標題 / 下一段」這組元件整體置中
+        view_toolbar.addStretch()
+        view_toolbar.addWidget(self.btn_view_categories)
+        view_toolbar.addWidget(self.btn_main_prev)
+        view_toolbar.addWidget(self.label_current_range)
+        view_toolbar.addWidget(self.btn_main_next)
+        view_toolbar.addStretch()
+
+        self.btn_view_day = QPushButton("日")
+        self.btn_view_week = QPushButton("週")
+        self.btn_view_month = QPushButton("月")
+        for btn in (self.btn_view_day, self.btn_view_week, self.btn_view_month):
+            btn.setCheckable(True)
+            btn.setMinimumWidth(48)
+            view_toolbar.addWidget(btn)
+
+        right_layout.addLayout(view_toolbar)
+
+        # 主行事曆視圖堆疊
+        self.calendar_stack = QStackedWidget()
+        self.day_view = DayViewWidget()
+        self.week_view = WeekViewWidget()
+        self.month_view = MonthViewWidget()
+        self.calendar_stack.addWidget(self.day_view)
+        self.calendar_stack.addWidget(self.week_view)
+        self.calendar_stack.addWidget(self.month_view)
+        right_layout.addWidget(self.calendar_stack)
 
         # 資料庫狀態列
         status_layout = QHBoxLayout()
         self.db_status_label = QLabel("資料庫: 未連線")
         status_layout.addWidget(self.db_status_label)
         status_layout.addStretch()
-        layout.addLayout(status_layout)
+        right_layout.addLayout(status_layout)
+
+        root_layout.addWidget(right_widget, 1)
+
+        # 訊號連接
+        self.nav_calendar.date_clicked.connect(self.on_nav_calendar_date_clicked)
+        self.nav_calendar_next.date_clicked.connect(self.on_nav_calendar_date_clicked)
+        self.btn_nav_prev.clicked.connect(lambda: self._shift_nav_month(-1))
+        self.btn_nav_next.clicked.connect(lambda: self._shift_nav_month(1))
+        self.combo_nav_month.currentIndexChanged.connect(self._on_nav_combo_changed)
+        self.combo_nav_year.currentIndexChanged.connect(self._on_nav_combo_changed)
+        self.btn_nav_today.clicked.connect(self._go_to_today_from_nav)
+        self.btn_view_categories.clicked.connect(self.manage_categories)
+        self.btn_main_prev.clicked.connect(lambda: self._shift_main_range(-1))
+        self.btn_main_next.clicked.connect(lambda: self._shift_main_range(1))
+        self.btn_view_day.clicked.connect(lambda: self._set_view_mode("day"))
+        self.btn_view_week.clicked.connect(lambda: self._set_view_mode("week"))
+        self.btn_view_month.clicked.connect(lambda: self._set_view_mode("month"))
+
+        # 初始化導覽月份下拉選單
+        self._init_nav_month_year()
+
+        # 預設為月視圖
+        self._set_view_mode("month", initial=True)
+
+        # 將 Day / Week / Month 視圖的右鍵動作導向主視窗邏輯
+        self.day_view.context_action_requested.connect(self._on_calendar_context_action)
+        self.week_view.context_action_requested.connect(self._on_calendar_context_action)
+        self.month_view.context_action_requested.connect(self._on_calendar_context_action)
 
         return panel
 
@@ -258,33 +545,22 @@ class CalendarUA(QMainWindow):
         # File 選單
         file_menu = menubar.addMenu("&File")
         
-        self.action_new = QAction("&New Schedule", self)
-        self.action_new.setShortcut("Ctrl+N")
-        self.action_new.setStatusTip("新增排程")
-        self.action_new.triggered.connect(self.add_schedule)
-        file_menu.addAction(self.action_new)
-        
-        self.action_refresh = QAction("&Refresh", self)
-        self.action_refresh.setShortcut("F5")
-        self.action_refresh.setStatusTip("重新載入排程資料")
-        self.action_refresh.triggered.connect(self.refresh_schedules)
-        file_menu.addAction(self.action_refresh)
+        # New Project：建立一個新的 Project（清除目前所有排程資料）
+        self.action_new_project = QAction("&New Project...", self)
+        self.action_new_project.setStatusTip("建立新的 Project（清除目前排程）")
+        self.action_new_project.triggered.connect(self.new_project)
+        file_menu.addAction(self.action_new_project)
 
-        self.action_apply = QAction("&Apply Schedule", self)
-        self.action_apply.setShortcut("Ctrl+Shift+A")
-        self.action_apply.setStatusTip("套用排程變更")
-        self.action_apply.triggered.connect(self.apply_schedules)
-        file_menu.addAction(self.action_apply)
-        
         file_menu.addSeparator()
         
-        self.action_load_profile = QAction("&Load Profile...", self)
-        self.action_load_profile.setStatusTip("載入設定檔")
+        # Project 設定檔（原 Profile）
+        self.action_load_profile = QAction("&Load Project...", self)
+        self.action_load_profile.setStatusTip("載入 Project 設定檔")
         self.action_load_profile.triggered.connect(self.load_profile)
         file_menu.addAction(self.action_load_profile)
         
-        self.action_save_profile = QAction("&Save Profile...", self)
-        self.action_save_profile.setStatusTip("儲存設定檔")
+        self.action_save_profile = QAction("&Save Project...", self)
+        self.action_save_profile.setStatusTip("儲存 Project 設定檔")
         self.action_save_profile.triggered.connect(self.save_profile)
         file_menu.addAction(self.action_save_profile)
         
@@ -295,30 +571,6 @@ class CalendarUA(QMainWindow):
         self.action_exit.setStatusTip("離開程式")
         self.action_exit.triggered.connect(self.close)
         file_menu.addAction(self.action_exit)
-        
-        # Edit 選單
-        edit_menu = menubar.addMenu("&Edit")
-        
-        self.action_edit = QAction("&Edit Schedule", self)
-        self.action_edit.setShortcut("Ctrl+E")
-        self.action_edit.setStatusTip("編輯排程")
-        self.action_edit.setEnabled(True)
-        self.action_edit.triggered.connect(self.edit_selected_schedule)
-        edit_menu.addAction(self.action_edit)
-        
-        self.action_delete = QAction("&Delete Schedule", self)
-        self.action_delete.setShortcut("Delete")
-        self.action_delete.setStatusTip("刪除排程")
-        self.action_delete.setEnabled(True)
-        self.action_delete.triggered.connect(self.delete_selected_schedule)
-        edit_menu.addAction(self.action_delete)
-        
-        edit_menu.addSeparator()
-        
-        self.action_manage_categories = QAction("Manage &Categories...", self)
-        self.action_manage_categories.setStatusTip("管理 Category 分類")
-        self.action_manage_categories.triggered.connect(self.manage_categories)
-        edit_menu.addAction(self.action_manage_categories)
         
         # Tools 選單
         tools_menu = menubar.addMenu("&Tools")
@@ -808,6 +1060,306 @@ class CalendarUA(QMainWindow):
         theme_data = self.theme_combo.currentData()
         self.set_theme(theme_data)
 
+    # ========= 主行事曆視圖相關 =========
+
+    def _init_nav_month_year(self):
+        """初始化左側導覽月曆的月份與年份下拉選單"""
+        months = ["1 月", "2 月", "3 月", "4 月", "5 月", "6 月",
+                  "7 月", "8 月", "9 月", "10 月", "11 月", "12 月"]
+        self.combo_nav_month.clear()
+        self.combo_nav_month.addItems(months)
+
+        current_year = QDate.currentDate().year()
+        years = list(range(current_year - 5, current_year + 6))
+        self.combo_nav_year.clear()
+        for y in years:
+            self.combo_nav_year.addItem(str(y), y)
+
+        # 設定當前年/月與預設 reference_date（高亮落在今日）
+        today = QDate.currentDate()
+        self.reference_date = today
+        # 讓 Combo 代表「左上顯示月份」= 今天所在的月份
+        self.combo_nav_month.blockSignals(True)
+        self.combo_nav_year.blockSignals(True)
+        self.combo_nav_month.setCurrentIndex(today.month() - 1)
+        year_index = years.index(today.year())
+        self.combo_nav_year.setCurrentIndex(year_index)
+        self.combo_nav_month.blockSignals(False)
+        self.combo_nav_year.blockSignals(False)
+        # 依 reference_date 同步兩個小月曆與主行事曆
+        self._update_nav_calendars(today.year(), today.month())
+
+    def _update_nav_calendars(self, year: int, month: int):
+        """同步更新兩個導覽月曆的顯示月份"""
+        self.nav_calendar.setCurrentPage(year, month)
+
+        next_qdate = QDate(year, month, 1).addMonths(1)
+        self.nav_calendar_next.setCurrentPage(next_qdate.year(), next_qdate.month())
+
+        # 更新左下方標題顯示的「下一個月 年/月」文字
+        if hasattr(self, "label_nav_next_header") and self.label_nav_next_header is not None:
+            self.label_nav_next_header.setText(next_qdate.toString("yyyy年 M月"))
+
+        # 更新兩個小月曆的高亮日期（共用同一個 reference_date）
+        if isinstance(self.nav_calendar, NavCalendarWidget):
+            self.nav_calendar.set_forced_selected_date(self.reference_date)
+        if isinstance(self.nav_calendar_next, NavCalendarWidget):
+            self.nav_calendar_next.set_forced_selected_date(self.reference_date)
+
+    def _shift_nav_month(self, delta: int):
+        """上一月 / 下一月"""
+        current_year = self.combo_nav_year.currentData()
+        current_month = self.combo_nav_month.currentIndex() + 1
+        if not current_year:
+            current_year = QDate.currentDate().year()
+
+        qd = QDate(current_year, current_month, 1).addMonths(delta)
+        self.reference_date = qd
+        # 更新下拉與月曆
+        self.combo_nav_month.setCurrentIndex(qd.month() - 1)
+        year_index = self.combo_nav_year.findData(qd.year())
+        if year_index >= 0:
+            self.combo_nav_year.setCurrentIndex(year_index)
+        self._update_nav_calendars(qd.year(), qd.month())
+        self._refresh_main_calendar_views()
+
+    def _on_nav_combo_changed(self):
+        """月份或年份下拉改變"""
+        year = self.combo_nav_year.currentData()
+        month = self.combo_nav_month.currentIndex() + 1
+        if not year or month <= 0:
+            return
+        qd = QDate(year, month, 1)
+        self.reference_date = qd
+        self._update_nav_calendars(year, month)
+        self._refresh_main_calendar_views()
+
+    def on_nav_calendar_date_clicked(self, qdate: QDate):
+        """左側小月曆點擊某天時（Outlook 行為）：
+        - 點上方白字（本月）：只換 reference_date，不改左側顯示月份
+        - 點下方白字（次月）：只換 reference_date，高亮移到下方，不改左側顯示月份
+        - 點上方淺灰（上個月）：左側顯示月份往回一個月（上=上個月，下=本月）
+        - 點下方淺灰（下下月）：左側顯示月份往前一個月（上=本月，下=下個月）
+        """
+        sender = self.sender()
+
+        base_year = self.combo_nav_year.currentData()
+        base_month = self.combo_nav_month.currentIndex() + 1
+        if not base_year or base_month <= 0:
+            base_year = QDate.currentDate().year()
+            base_month = QDate.currentDate().month()
+
+        top_first = QDate(base_year, base_month, 1)          # 上方顯示月份
+        bottom_first = top_first.addMonths(1)                 # 下方顯示月份
+        after_bottom_first = top_first.addMonths(2)           # 下方再下一個月
+        prev_first = top_first.addMonths(-1)                  # 上方前一個月
+
+        # 先更新 reference_date（右側主視圖需要跟著動）
+        self.reference_date = qdate
+
+        # 依點擊來源與點到的月份決定是否要推動左側兩個月曆的顯示月份
+        new_base_first = None
+
+        if sender is self.nav_calendar:
+            # 上方：
+            #   本月白字：qdate.month == top_first.month -> 不動
+            #   上方淺灰（上個月任何一天）：qdate.month == prev_first.month -> 往回一個月
+            if qdate.year() == prev_first.year() and qdate.month() == prev_first.month():
+                new_base_first = prev_first
+        elif sender is self.nav_calendar_next:
+            # 下方：
+            #   次月白字：qdate.month == bottom_first.month -> 不動
+            #   下方淺灰（下下月任何一天）：qdate.month == after_bottom_first.month -> 往前一個月（base + 1）
+            if qdate.year() == after_bottom_first.year() and qdate.month() == after_bottom_first.month():
+                new_base_first = bottom_first
+
+        if new_base_first is not None:
+            # 同步下拉（代表左側顯示的「上方月份」）
+            self.combo_nav_month.blockSignals(True)
+            self.combo_nav_year.blockSignals(True)
+            self.combo_nav_month.setCurrentIndex(new_base_first.month() - 1)
+            year_index = self.combo_nav_year.findData(new_base_first.year())
+            if year_index >= 0:
+                self.combo_nav_year.setCurrentIndex(new_base_first.year())
+            self.combo_nav_month.blockSignals(False)
+            self.combo_nav_year.blockSignals(False)
+            self._update_nav_calendars(new_base_first.year(), new_base_first.month())
+        else:
+            # 不改左側月份，只更新兩個月曆高亮
+            if isinstance(self.nav_calendar, NavCalendarWidget):
+                self.nav_calendar.set_forced_selected_date(self.reference_date)
+            if isinstance(self.nav_calendar_next, NavCalendarWidget):
+                self.nav_calendar_next.set_forced_selected_date(self.reference_date)
+
+        self._refresh_main_calendar_views()
+
+    def _go_to_today_from_nav(self):
+        """點擊左側『今日』按鈕時，回到今天"""
+        today = QDate.currentDate()
+        self.reference_date = today
+        # 同步下拉（暫時關閉 signals，避免 _on_nav_combo_changed 把日期改成該月 1 號）
+        self.combo_nav_month.blockSignals(True)
+        self.combo_nav_year.blockSignals(True)
+        self.combo_nav_month.setCurrentIndex(today.month() - 1)
+        year_index = self.combo_nav_year.findData(today.year())
+        if year_index >= 0:
+            self.combo_nav_year.setCurrentIndex(year_index)
+        self.combo_nav_month.blockSignals(False)
+        self.combo_nav_year.blockSignals(False)
+
+        # 同步導覽月曆與主行事曆（此時 reference_date 已是今天）
+        self._update_nav_calendars(today.year(), today.month())
+        self._refresh_main_calendar_views()
+
+    def _on_nav_date_changed(self):
+        """左側導覽月曆日期變更"""
+        # 若使用 NavCalendarWidget，自訂的點擊邏輯會呼叫 on_nav_calendar_date_clicked，
+        # 這裡僅作保險同步目前 Qt 的 selectedDate。
+        self.reference_date = self.nav_calendar.selectedDate()
+        self._update_nav_calendars(self.reference_date.year(), self.reference_date.month())
+        self._refresh_main_calendar_views()
+
+    def _set_view_mode(self, mode: str, initial: bool = False):
+        """切換 Day / Week / Month / Year 視圖"""
+        self.current_view_mode = mode
+
+        self.btn_view_day.setChecked(mode == "day")
+        self.btn_view_week.setChecked(mode == "week")
+        self.btn_view_month.setChecked(mode == "month")
+
+        if mode == "day":
+            self.calendar_stack.setCurrentIndex(0)
+        elif mode == "week":
+            self.calendar_stack.setCurrentIndex(1)
+        else:
+            # "month" 視圖使用月格顯示
+            self.calendar_stack.setCurrentIndex(2)
+
+        if not initial:
+            self._refresh_main_calendar_views()
+
+    def _shift_main_range(self, delta: int):
+        """
+        主視窗上一段 / 下一段：
+        - 日視圖：delta 天
+        - 週視圖：delta 週（7 天）
+        - 月視圖：delta 月
+        """
+        if not isinstance(self.reference_date, QDate) or not self.reference_date.isValid():
+            self.reference_date = QDate.currentDate()
+
+        if self.current_view_mode == "day":
+            self.reference_date = self.reference_date.addDays(delta)
+        elif self.current_view_mode == "week":
+            self.reference_date = self.reference_date.addDays(delta * 7)
+        else:
+            # month 視圖
+            self.reference_date = self.reference_date.addMonths(delta)
+
+        # 同步左側導覽月曆與主視窗
+        self._update_nav_calendars(self.reference_date.year(), self.reference_date.month())
+        self._refresh_main_calendar_views()
+
+    def _refresh_main_calendar_views(self):
+        """依目前 view mode 與日期，更新 Day/Week/Month 行事曆內容"""
+        if not self.db_manager:
+            return
+
+        from datetime import datetime, timedelta
+
+        # 確保一開始就以「今天」為基準，而不是某些地方把日期重設為該月 1 號
+        qd = self.reference_date if self.reference_date.isValid() else QDate.currentDate()
+        start = end = None
+
+        if self.current_view_mode == "day":
+            start = datetime(qd.year(), qd.month(), qd.day())
+            end = start + timedelta(days=1)
+            self.label_current_range.setText(start.strftime("%Y年%m月%d日"))
+        elif self.current_view_mode == "week":
+            # 以週日為一週起始（配合 UI 標頭「日 一 二 三 四 五 六」）
+            weekday = qd.dayOfWeek()  # 1=Mon, 7=Sun
+            # 將 Sunday 視為 0，其餘 1..6 對應 Mon..Sat
+            offset_from_sunday = weekday % 7
+            week_start = qd.addDays(-offset_from_sunday)
+            week_end = week_start.addDays(6)
+            start = datetime(week_start.year(), week_start.month(), week_start.day())
+            end = datetime(week_end.year(), week_end.month(), week_end.day()) + timedelta(
+                days=1
+            )
+            self.label_current_range.setText(
+                f"{week_start.toString('yyyy/MM/dd')} - {week_end.toString('yyyy/MM/dd')}"
+            )
+        else:
+            # 月視圖（Year 模式目前沿用月視圖）
+            first = QDate(qd.year(), qd.month(), 1)
+            next_month = first.addMonths(1)
+            start = datetime(first.year(), first.month(), first.day())
+            end = datetime(next_month.year(), next_month.month(), next_month.day())
+            self.label_current_range.setText(qd.toString("yyyy年 M月"))
+
+        if start is None or end is None:
+            return
+
+        occurrences = resolve_occurrences_for_range(
+            self.schedules or [],
+            start,
+            end,
+            self.schedule_exceptions or [],
+            self.holiday_entries or [],
+            self.db_manager,
+        )
+
+        # Day / Week / Month 視圖同步
+        self.day_view.set_reference_date(self.reference_date)
+        self.day_view.set_occurrences(occurrences)
+
+        self.week_view.set_reference_date(self.reference_date)
+        self.week_view.set_occurrences(occurrences)
+
+        self.month_view.set_reference_date(
+            QDate(self.reference_date.year(), self.reference_date.month(), 1)
+        )
+        self.month_view.set_selected_date(self.reference_date)
+        self.month_view.set_occurrences(occurrences)
+
+    def _on_calendar_context_action(self, action: str, payload: dict):
+        """處理 Day/Week/Month 視圖發出的右鍵選單動作"""
+        schedule_id = payload.get("schedule_id")
+        date_str = payload.get("date")
+        hour = payload.get("hour")
+
+        # 記錄本次操作預設小時，供新增排程時帶入 RecurrenceDialog
+        self._context_default_hour = hour if isinstance(hour, int) else None
+        if date_str:
+            try:
+                y, m, d = map(int, date_str.split("-"))
+                self.reference_date = QDate(y, m, d)
+                # 同步左側導覽月曆
+                self._update_nav_calendars(y, m)
+            except Exception:
+                pass
+
+        if action == "new":
+            self.add_schedule()
+        elif action == "edit":
+            if schedule_id:
+                # 將當前點選的日期與小時帶入，用於 RecurrenceDialog 預設時間
+                self.edit_schedule(schedule_id, default_date=self.reference_date, default_hour=self._context_default_hour)
+            else:
+                QMessageBox.information(self, "提示", "此日期尚未有行程可編輯。")
+        elif action == "delete":
+            if schedule_id:
+                self.delete_schedule(schedule_id)
+            else:
+                QMessageBox.information(self, "提示", "此日期尚未有行程可刪除。")
+        elif action == "today":
+            today = QDate.currentDate()
+            self.reference_date = today
+            self._update_nav_calendars(today.year(), today.month())
+            self._refresh_main_calendar_views()
+        elif action == "refresh":
+            self.refresh_schedules()
+
     def init_database(self):
         """初始化資料庫連線"""
         try:
@@ -818,19 +1370,7 @@ class CalendarUA(QMainWindow):
             if self.db_manager.init_db():
                 self.db_status_label.setText("資料庫: 已連線")
                 self.db_status_label.setStyleSheet("color: green;")
-                
-                # 設定 General Panel 的 db_manager
-                if hasattr(self, 'general_panel'):
-                    self.general_panel.set_db_manager(self.db_manager)
-                
-                # 設定 Holidays Panel 的 db_manager
-                if hasattr(self, 'holidays_panel'):
-                    self.holidays_panel.set_db_manager(self.db_manager)
-                
-                # 設定 Exceptions Panel 的 db_manager
-                if hasattr(self, 'exceptions_panel'):
-                    self.exceptions_panel.set_db_manager(self.db_manager)
-                
+
                 self.load_schedules()
                 self.start_scheduler()
             else:
@@ -857,25 +1397,15 @@ class CalendarUA(QMainWindow):
         self.holiday_entries = self.db_manager.get_all_holiday_entries()
         # 重置執行計數器（應用程式重啟時從 0 開始）
         self.execution_counts = {}
-        
-        # 載入到 Holidays Panel
-        if hasattr(self, 'holidays_panel'):
-            self.holidays_panel.refresh()
-        
-        # 載入到 Exceptions Panel
-        if hasattr(self, 'exceptions_panel'):
-            self.exceptions_panel.load_data(self.schedules, self.schedule_exceptions)
-        
+
+        # 更新主行事曆視圖
+        self._refresh_main_calendar_views()
         self.status_bar.showMessage(f"已載入 {len(self.schedules)} 個排程")
 
     def _on_general_settings_changed(self):
         """全局設定變更時的處理"""
         self.status_bar.showMessage("全局設定已更新")
-        # 可以在這裡根據新設定調整行為，例如更新掃描間隔等
-        if hasattr(self, 'general_panel'):
-            settings = self.general_panel.get_current_settings()
-            # 如果需要，可以根據 settings['enable_schedule'] 啟用/禁用排程
-            logger.info(f"全局設定已更新: {settings.get('profile_name', 'Unknown')}")
+        # 若未來需要，可在此讀取 general_settings 調整排程行為
 
     def _format_schedule_description(self, rrule_str: str, schedule_id: int = 0) -> str:
         """將 RRULE 轉換為中文簡易說明"""
@@ -1185,8 +1715,12 @@ class CalendarUA(QMainWindow):
 
 
     def add_schedule(self):
-        """新增排程"""
-        dialog = ScheduleEditDialog(self)
+        """新增排程（可由主行事曆帶入預設日期/時間）"""
+        # 嘗試從目前 reference_date 與右鍵 payload 帶入時間
+        default_date = getattr(self, "reference_date", QDate.currentDate())
+        default_hour = getattr(self, "_context_default_hour", None)
+
+        dialog = ScheduleEditDialog(self, default_date=default_date, default_hour=default_hour)
         if dialog.exec() == QDialog.Accepted:
             data = dialog.get_data()
 
@@ -1214,8 +1748,8 @@ class CalendarUA(QMainWindow):
                 else:
                     QMessageBox.critical(self, "錯誤", "新增排程失敗")
 
-    def edit_schedule(self, schedule_id: int = None):
-        """編輯排程"""
+    def edit_schedule(self, schedule_id: int = None, default_date: QDate | None = None, default_hour: int | None = None):
+        """編輯排程（可帶入目前點選的日期/時間，供週期對話框預設使用）"""
         if schedule_id is None:
             QMessageBox.information(self, "提示", "請先選擇要編輯的排程")
             return
@@ -1224,7 +1758,7 @@ class CalendarUA(QMainWindow):
         if not schedule:
             return
 
-        dialog = ScheduleEditDialog(self, schedule)
+        dialog = ScheduleEditDialog(self, schedule, default_date=default_date, default_hour=default_hour)
         if dialog.exec() == QDialog.Accepted:
             data = dialog.get_data()
 
@@ -1363,7 +1897,7 @@ class CalendarUA(QMainWindow):
         """載入設定檔"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "載入 Profile 設定檔",
+            "載入 Project 設定檔",
             "",
             "JSON Files (*.json);;All Files (*.*)"
         )
@@ -1453,8 +1987,8 @@ class CalendarUA(QMainWindow):
 
                 self.load_schedules()
             
-            QMessageBox.information(self, "成功", f"已載入設定檔:\n{file_path}")
-            self.status_bar.showMessage(f"已載入 Profile: {file_path}", 5000)
+            QMessageBox.information(self, "成功", f"已載入 Project 設定檔:\n{file_path}")
+            self.status_bar.showMessage(f"已載入 Project: {file_path}", 5000)
             
         except Exception as e:
             QMessageBox.critical(self, "錯誤", f"載入設定檔失敗:\n{str(e)}")
@@ -1463,7 +1997,7 @@ class CalendarUA(QMainWindow):
         """儲存設定檔"""
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "儲存 Profile 設定檔",
+            "儲存 Project 設定檔",
             "",
             "JSON Files (*.json);;All Files (*.*)"
         )
@@ -1521,8 +2055,8 @@ class CalendarUA(QMainWindow):
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(profile_data, f, indent=2, ensure_ascii=False)
             
-            QMessageBox.information(self, "成功", f"已儲存設定檔:\n{file_path}")
-            self.status_bar.showMessage(f"已儲存 Profile: {file_path}", 5000)
+            QMessageBox.information(self, "成功", f"已儲存 Project 設定檔:\n{file_path}")
+            self.status_bar.showMessage(f"已儲存 Project: {file_path}", 5000)
             
         except Exception as e:
             QMessageBox.critical(self, "錯誤", f"儲存設定檔失敗:\n{str(e)}")
@@ -1533,6 +2067,33 @@ class CalendarUA(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             # 重新連線資料庫
             self.init_database()
+
+    def new_project(self):
+        """
+        建立新的 Project：
+        - 清除目前資料庫中所有排程（schedules），相關例外會因外鍵自動刪除
+        - 保留 Categories / 假日日曆 等設定，方便重複使用
+        """
+        reply = QMessageBox.question(
+            self,
+            "New Project",
+            "建立新的 Project 將會清除目前所有排程資料（但保留 Category 與假日設定）。\n此操作無法復原，確定要繼續嗎？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if not self.db_manager:
+            QMessageBox.warning(self, "警告", "尚未連線資料庫，無法建立新 Project。")
+            return
+
+        if self.db_manager.clear_all_schedules():
+            # 重新載入，讓 UI 與排程執行緒都看到乾淨狀態
+            self.load_schedules()
+            self.status_bar.showMessage("已建立新 Project（所有排程已清空）。", 5000)
+        else:
+            QMessageBox.critical(self, "錯誤", "清除排程資料失敗，新 Project 建立未完成。")
 
     def show_about(self):
         """顯示關於對話框"""
@@ -2985,10 +3546,20 @@ class OPCSettingsDialog(QDialog):
 class ScheduleEditDialog(QDialog):
     """排程編輯對話框"""
 
-    def __init__(self, parent=None, schedule: Dict[str, Any] = None):
+    def __init__(
+        self,
+        parent=None,
+        schedule: Dict[str, Any] = None,
+        default_date: Optional[QDate] = None,
+        default_hour: Optional[int] = None,
+    ):
         super().__init__(parent)
         self.schedule = schedule
         self.original_rrule = ""  # 儲存原始的 RRULE 字串
+
+        # 從主行事曆帶入的預設日期/時間（例如右鍵點選的格子）
+        self.default_date: Optional[QDate] = default_date
+        self.default_hour: Optional[int] = default_hour
 
         # 取得資料庫管理器
         self.db_manager = parent.db_manager if parent and hasattr(parent, 'db_manager') else None
@@ -3362,7 +3933,18 @@ class ScheduleEditDialog(QDialog):
     def edit_recurrence(self):
         """編輯週期規則"""
         current_rrule = self.original_rrule
-        rrule = show_recurrence_dialog(self, current_rrule)
+        from PySide6.QtCore import QTime
+
+        initial_time = None
+        if self.default_hour is not None:
+            initial_time = QTime(self.default_hour, 0, 0)
+
+        rrule = show_recurrence_dialog(
+            self,
+            current_rrule,
+            initial_date=self.default_date,
+            initial_time=initial_time,
+        )
         if rrule:
             self.original_rrule = rrule
             # 暫時直接顯示原始 RRULE，稍後可以改進為格式化顯示

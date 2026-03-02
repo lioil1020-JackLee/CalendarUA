@@ -107,18 +107,12 @@ class RRuleParser:
         count: int = 5,
         dtstart: Optional[datetime] = None,
         after: Optional[datetime] = None,
-    ) -> list:
+    ) -> list[datetime]:
         """
-        取得接下來 N 次的觸發時間
+        取得接下來 N 次的觸發時間。
 
-        Args:
-            rrule_str: RRULE 規則字串
-            count: 要取得的觸發次數
-            dtstart: 開始時間
-            after: 從此時間之後開始計算
-
-        Returns:
-            list: 觸發時間列表
+        注意：這個方法會使用 dateutil.rrule 提供的 iterator，
+        不會修改或依賴任何 UI / 資料庫邏輯。
         """
         try:
             rule = RRuleParser.parse_rrule(rrule_str, dtstart)
@@ -128,10 +122,11 @@ class RRuleParser:
             if after is None:
                 after = datetime.now()
 
-            # 取得接下來的觸發時間
-            triggers = list(rule.after(after, inc=False) for _ in range(count))
-            # 過濾掉 None 值
-            triggers = [t for t in triggers if t is not None][:count]
+            triggers: list[datetime] = []
+            current = rule.after(after, inc=False)
+            while current is not None and len(triggers) < count:
+                triggers.append(current)
+                current = rule.after(current, inc=False)
 
             return triggers
 
@@ -240,15 +235,8 @@ class RRuleParser:
     @staticmethod
     def create_daily_rule(hour: int, minute: int, **kwargs) -> str:
         """
-        建立每日觸發的 RRULE 字串
-
-        Args:
-            hour: 小時 (0-23)
-            minute: 分鐘 (0-59)
-            **kwargs: 其他 RRULE 參數
-
-        Returns:
-            str: RRULE 字串
+        建立每日觸發的 RRULE 字串。
+        不依賴任何 UI / DB，方便在對話框或測試程式中直接呼叫。
         """
         rrule_str = f"FREQ=DAILY;BYHOUR={hour};BYMINUTE={minute}"
         for key, value in kwargs.items():
@@ -256,19 +244,8 @@ class RRuleParser:
         return rrule_str
 
     @staticmethod
-    def create_weekly_rule(hour: int, minute: int, days: list, **kwargs) -> str:
-        """
-        建立每週觸發的 RRULE 字串
-
-        Args:
-            hour: 小時 (0-23)
-            minute: 分鐘 (0-59)
-            days: 星期列表 ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU']
-            **kwargs: 其他 RRULE 參數
-
-        Returns:
-            str: RRULE 字串
-        """
+    def create_weekly_rule(hour: int, minute: int, days: list[str], **kwargs) -> str:
+        """建立每週觸發的 RRULE 字串。"""
         byday = ",".join(days)
         rrule_str = f"FREQ=WEEKLY;BYHOUR={hour};BYMINUTE={minute};BYDAY={byday}"
         for key, value in kwargs.items():
@@ -277,18 +254,7 @@ class RRuleParser:
 
     @staticmethod
     def create_monthly_rule(hour: int, minute: int, monthday: int, **kwargs) -> str:
-        """
-        建立每月觸發的 RRULE 字串
-
-        Args:
-            hour: 小時 (0-23)
-            minute: 分鐘 (0-59)
-            monthday: 每月幾號 (1-31)
-            **kwargs: 其他 RRULE 參數
-
-        Returns:
-            str: RRULE 字串
-        """
+        """建立每月觸發的 RRULE 字串。"""
         rrule_str = (
             f"FREQ=MONTHLY;BYHOUR={hour};BYMINUTE={minute};BYMONTHDAY={monthday}"
         )
@@ -296,32 +262,3 @@ class RRuleParser:
             rrule_str += f";{key.upper()}={value}"
         return rrule_str
 
-
-# 使用範例
-if __name__ == "__main__":
-    # 每日早上 8:00
-    daily_rule = "FREQ=DAILY;BYHOUR=8;BYMINUTE=0"
-    next_trigger = RRuleParser.get_next_trigger(daily_rule)
-    print(f"每日觸發，下次: {next_trigger}")
-
-    # 每週二、四下午 2:00
-    weekly_rule = "FREQ=WEEKLY;BYHOUR=14;BYMINUTE=0;BYDAY=TU,TH"
-    next_trigger = RRuleParser.get_next_trigger(weekly_rule)
-    print(f"每週二四觸發，下次: {next_trigger}")
-
-    # 取得接下來 5 次觸發
-    triggers = RRuleParser.get_upcoming_triggers(weekly_rule, count=5)
-    print(f"\n接下來 5 次觸發:")
-    for i, t in enumerate(triggers, 1):
-        print(f"  {i}. {t}")
-
-    # 使用輔助方法建立規則
-    print("\n使用輔助方法:")
-    daily = RRuleParser.create_daily_rule(9, 30)
-    print(f"每日 9:30: {daily}")
-
-    weekly = RRuleParser.create_weekly_rule(14, 0, ["MO", "WE", "FR"])
-    print(f"每週一三五 14:00: {weekly}")
-
-    monthly = RRuleParser.create_monthly_rule(10, 0, 15)
-    print(f"每月 15 日 10:00: {monthly}")

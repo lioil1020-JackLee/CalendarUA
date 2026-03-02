@@ -1,3 +1,188 @@
+## CalendarUA - 工業級 Outlook 風格行事曆＋OPC UA 排程
+
+CalendarUA 是一個以 **Outlook 行事曆** 為靈感、專為 **OPC UA 工業寫值排程** 設計的桌面應用程式，使用 **PySide6** 開發。
+
+核心目標：
+
+- **完整行事曆體驗**：支援 Day / Week / Month 視圖、例外與假日、分類顏色。
+- **工業排程整合**：每個排程都是一條 OPC UA 動作（Server URL、NodeId、Value、Datatype）。
+- **可擴充農民曆 / 農曆排程**：預留 `core/lunar_calendar.py` 介面，可安裝農曆套件後擴充。
+
+---
+
+### 專案架構總覽
+
+- `CalendarUA.py`  
+  主視窗與應用程式入口，負責：
+  - 建立主 UI（General / Holidays / Exceptions Tabs，以及其他排程相關視圖）
+  - 管理資料庫連線與背景排程執行緒
+  - 把資料從 `SQLiteManager` 傳遞到各個 UI Panel
+
+- `core/`
+  - `schedule_resolver.py`  
+    排程引擎，將：
+    - `schedules`（系列排程）
+    - `schedule_exceptions`（例外）
+    - `holiday_entries`（假日條目）  
+    在指定時間範圍內解析成 **實際發生的 Occurrence 列表**（`ResolvedOccurrence`）。
+  - `rrule_parser.py`  
+    封裝 `dateutil.rrule` 的 RRULE 解析與計算工具，提供：
+    - `get_next_trigger(...)`
+    - `get_trigger_between(...)`
+    - 常用 RRULE 產生器（`create_daily_rule` / `create_weekly_rule` / `create_monthly_rule`）。
+  - `schedule_models.py`  
+    行事曆 Domain Model dataclass 集中定義，例如：
+    - `ScheduleSeries`（一條 OPC UA 排程系列）
+    - `ScheduleException`（單次例外）
+    - `HolidayCalendar` / `HolidayEntry`（假日日曆與條目）
+    - `RuntimeOverride`（Runtime 覆寫狀態）。
+  - `opc_handler.py`  
+    OPC UA 非同步處理類別，使用 `asyncua`：
+    - 建立安全連線（無加密 / 憑證 / 使用者帳密）
+    - `write_node(node_id, value, data_type)`：寫值並讀回驗證
+    - `read_node(node_id)`、`read_node_data_type(node_id)`。
+  - `lunar_calendar.py`  
+    **預留**的農曆 / 農民曆工具：
+    - 若安裝了農曆套件，可用來做西曆 <-> 農曆轉換、查詢宜/忌等。
+    - 若沒有安裝，函式會回傳 `None` / 空資料，不會影響主程式運作。
+
+- `database/`
+  - `sqlite_manager.py`  
+    SQLite 資料庫存取層，負責：
+    - 初始化/遷移資料表（schedules / schedule_exceptions / holiday_* / general_settings / runtime_override / schedule_categories）
+    - 所有排程、例外、假日、General 設定、Runtime Override 的 CRUD。
+
+- `ui/`
+  - `general_panel.py`：General Tab，管理 Profile 與全域設定。
+  - `holidays_panel.py`：Holidays Tab，管理假日日曆與假日條目。
+  - `exceptions_panel.py`：Exceptions Tab，類似 Outlook/ScheduleWorX 的例外管理＋日曆視圖。
+  - `schedule_canvas.py`：Day / Week 時間格視圖，用 `ResolvedOccurrence` 畫出全天 24h 排程。
+  - `month_grid.py`：Month 視圖，每格顯示日期 ＋ 最多 3 個事件「小膠囊」。
+  - `weekly_panel.py` / `weekly_event_dialog.py`：週間（FREQ=WEEKLY）班表編輯器。
+  - `runtime_panel.py`：Runtime Override 面板，手動覆寫輸出值並顯示下一事件資訊。
+  - `recurrence_dialog.py`：排程重複規則對話框。
+  - `database_settings_dialog.py`：資料庫設定對話框。
+  - `category_manager_dialog.py`：排程 Category 顏色管理。
+
+---
+
+### 資料庫結構概要
+
+詳細欄位說明請見 `docs/db_schema.md`，以下為重點：
+
+- `schedules`
+  - 一條記錄 = 一個 **OPC UA 排程系列**：
+    - `task_name`: 排程名稱
+    - `opc_url`, `node_id`, `target_value`, `data_type`
+    - `rrule_str`: RRULE 字串（頻率、時間、重複規則）
+    - `category_id`: 類別顏色
+    - `is_enabled`: 是否啟用
+    - 及一組 OPC UA 安全 / 認證相關欄位（security_policy / username / password / timeout ...）。
+
+- `schedule_exceptions`
+  - 管理「取消」或「覆寫」單次 occurrence：
+    - `schedule_id`, `occurrence_date`, `action`("cancel"/"override")
+    - `override_start`, `override_end`
+    - `override_task_name`, `override_target_value`
+    - `override_category_id`, `note`。
+
+- `holiday_calendars` / `holiday_entries`
+  - 多個假日日曆，每個日曆底下有多個假日：
+    - `holiday_date` + `is_full_day` + 可選時段 (`start_time` / `end_time`)
+    - 可選覆寫 (`override_category_id` / `override_target_value`)。
+
+- `schedule_categories`
+  - 類似 Outlook 類別顏色標籤，定義：
+    - `name`, `bg_color`, `fg_color`, `sort_order`, `is_system`。
+
+- `general_settings`
+  - 全域 Profile 設定，僅一筆：
+    - `profile_name`, `description`
+    - `enable_schedule`, `scan_rate`, `refresh_rate`
+    - `use_active_period`, `active_from`, `active_to`
+    - `output_type`, `refresh_output`, `generate_events`。
+
+- `runtime_override`
+  - Runtime Override（最多一筆），優先於所有排程：
+    - `override_value`, `override_until`。
+
+---
+
+### 執行方式
+
+1. 建議使用虛擬環境安裝相依套件，例如：
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+pip install -r requirements.txt
+```
+
+2. 啟動主程式：
+
+```bash
+python CalendarUA.py
+```
+
+首次執行時會在 `database/calendarua.db` 自動建立資料表與預設 Category。
+
+---
+
+### 主要使用流程
+
+- **新增排程**
+  - 透過主視窗的「New」或 Weekly Tab、其他排程編輯入口。
+  - 填寫：
+    - 排程名稱、OPC UA 伺服器 URL、NodeId
+    - 目標值（Target Value）與資料型別
+    - RRULE 重複規則（每日、每週、每月等）
+  - 儲存後即會出現在 Day / Week / Month 視圖與 Exceptions Panel。
+
+- **設定假日與例外**
+  - Holidays Tab：管理假日日曆與假日條目，可指定全天或特定時段。
+  - Exceptions Tab：為某天的單次 occurrence 新增取消 / 覆寫記錄。
+
+- **Runtime Override**
+  - 在 Runtime Panel 輸入覆寫值，選擇有效期間：
+    - 永久（手動清除前）、或 30 秒～1 週等選項。
+  - 在有效期內，系統輸出將以 Runtime Override 為準。
+
+- **OPC UA 寫值排程**
+  - 背景排程執行緒定期檢查：
+    - 目前時間附近哪些 occurrence 應觸發
+    - 呼叫 `OPCHandler` 進行寫值與驗證。
+
+---
+
+### 農民曆 / 農曆排程擴充
+
+目前專案已在 `core/lunar_calendar.py` 中預留：
+
+- `to_lunar(gregorian: date) -> Optional[LunarDateInfo]`
+- `from_lunar(year, month, day, leap=False) -> Optional[date]`
+- `get_almanac_info(gregorian: date) -> Dict[str, Any]`
+
+你可以：
+
+1. 安裝適合的農曆 / 農民曆套件（例如 `lunarcalendar` 等）。
+2. 根據實際套件 API，補齊 `lunar_calendar.py` 的 TODO 區塊。
+3. 在排程編輯對話框中，新增「以農曆設定」的模式，內部再轉換成西曆 RRULE 或多個 RDATE。
+
+---
+
+### 專案設計原則
+
+- **不在 UI 層寫排程邏輯**：  
+  所有「什麼時候發生」的邏輯集中在 `core/rrule_parser.py` 與 `core/schedule_resolver.py`。
+
+- **不在資料庫層寫商業邏輯**：  
+  `database/sqlite_manager.py` 只做 CRUD 與 Schema 管理，沒有 UI 或排程判斷。
+
+- **模組分界清楚、方便未來擴充**：  
+  例如：未來要增加「多行事曆」或「Web/REST API」，只需要：
+  - 重用 `schedule_models` 與 `schedule_resolver`
+  - 換一層新的 UI 或 API 即可。
+
 # CalendarUA - 工業自動化排程管理系統
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)

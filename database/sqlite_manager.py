@@ -432,6 +432,10 @@ class SQLiteManager:
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_holiday_entries_category ON holiday_entries(override_category_id)"
                 )
+                # 依照下一次執行時間優化查詢效能（排程掃描常用）
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_schedules_next_time ON schedules(next_execution_time)"
+                )
                 
                 conn.commit()
                 
