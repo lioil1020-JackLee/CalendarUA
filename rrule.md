@@ -54,6 +54,20 @@ FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=15;DTSTART:20260301T081500;DU
 2. 套用 `schedule_exceptions`（`cancel/override`）
 3. 若排程未勾 `ignore_holiday`，再套用 `holidays`
 
+### 4.3 啟動回補與執行中熱更新（v3.0.0）
+
+- 啟動回補：
+	- 若排程包含 `DURATION`，且目前時間落在期間內，排程器可回補最近一次觸發點。
+	- 用 occurrence 起始時間去重，避免同一觸發點重複執行。
+
+- 執行中熱更新：
+	- 任務執行迴圈會動態重讀排程設定，`lock_enabled`、`target_value`、`data_type`、`node_id`、`is_enabled`、OPC 連線參數可即時生效。
+	- 若連線參數改變（如 `opc_url` / 帳密 / 安全策略 / timeout），會自動重連。
+
+- 假日覆寫動態套用：
+	- 每次輪詢會即時判定是否命中假日規則。
+	- 命中且規則有 `override_target_value` 時，該次寫值使用覆寫值。
+
 ---
 
 ## 5. 範例

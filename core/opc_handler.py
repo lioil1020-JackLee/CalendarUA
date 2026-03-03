@@ -33,6 +33,13 @@ class OPCHandler:
         self.client: Optional[Client] = None
         self.is_connected = False
 
+        # Session timeout（毫秒）
+        # asyncua 預設會請求 3600000ms，部分伺服器僅接受 60000ms，容易產生警告訊息。
+        try:
+            self.session_timeout_ms = int(os.getenv("CALENDARUA_OPC_SESSION_TIMEOUT_MS", "60000"))
+        except (TypeError, ValueError):
+            self.session_timeout_ms = 60000
+
         # 安全配置
         self.security_policy: Optional[str] = None
         self.message_security_mode: Optional[str] = None
@@ -86,6 +93,10 @@ class OPCHandler:
         try:
             self.client = Client(self.url)
 
+            # 避免向伺服器請求過長 session timeout 造成不必要警告
+            if self.session_timeout_ms > 0:
+                self.client.session_timeout = self.session_timeout_ms
+
             # 設定安全策略
             if self.security_policy:
                 await self._configure_security()
@@ -97,6 +108,22 @@ class OPCHandler:
 
             # 連線到伺服器
             await asyncio.wait_for(self.client.connect(), timeout=self.timeout)
+
+            # 連線後握手：確認 Session 已可用，避免剛連線立即讀寫造成 Bad。
+            ready = False
+            last_ready_error: Optional[Exception] = None
+            for _ in range(3):
+                try:
+                    await asyncio.wait_for(self.client.get_namespace_array(), timeout=self.timeout)
+                    ready = True
+                    break
+                except Exception as ready_err:
+                    last_ready_error = ready_err
+                    await asyncio.sleep(0.3)
+
+            if not ready:
+                raise RuntimeError(f"OPC UA Session 尚未就緒: {last_ready_error}")
+
             self.is_connected = True
             logger.info(f"成功連線到 OPC UA 伺服器: {self.url}")
             return True
@@ -257,12 +284,18 @@ class OPCHandler:
                         # 其他型別使用自動偵測
                         variant = ua.Variant(typed_value)
                     
-                    # 寫入數值
-                    await node.write_value(variant)
+                    # 寫入數值（先用一般寫法；若伺服器不支援 value+status+timestamp 組合，再 fallback）
+                    await self._write_value_with_fallback(node, variant)
                     logger.info(f"成功寫入 {node_id} = {typed_value} (型別: {type(typed_value).__name__})")
 
                     # 讀取驗證
-                    read_value = await node.read_value()
+                    try:
+                        read_value = await node.read_value()
+                    except Exception as read_err:
+                        # 部分伺服器/節點可能允許寫入但不允許讀取，寫入成功即視為成功
+                        logger.warning(f"寫入後讀取驗證失敗（視為寫入成功）: {read_err}")
+                        return True
+
                     logger.info(f"驗證讀取 {node_id} = {read_value} (型別: {type(read_value).__name__})")
 
                     # 比較寫入值和讀取值
@@ -285,6 +318,22 @@ class OPCHandler:
         except Exception as e:
             logger.error(f"寫入 Node {node_id} 失敗: {e}")
             return False
+
+    async def _write_value_with_fallback(self, node: Node, variant: ua.Variant):
+        """寫入值並針對部分 OPC UA 伺服器做相容處理。"""
+        try:
+            await node.write_value(variant)
+            return
+        except Exception as e:
+            error_text = str(e)
+            if "BadWriteNotSupported" not in error_text:
+                raise
+
+            # 某些伺服器不接受 write_value 預設帶入的 timestamp/status。
+            # 改為只寫 Value Attribute。
+            dv = ua.DataValue(variant)
+
+            await node.write_attribute(ua.AttributeIds.Value, dv)
 
     def _values_equal(self, written_value: Any, read_value: Any) -> bool:
         """
@@ -319,7 +368,7 @@ class OPCHandler:
             # 如果比較過程中出現異常，視為不相等
             return False
 
-    async def read_node(self, node_id: str) -> Optional[Any]:
+    async def read_node(self, node_id: str, suppress_errors: bool = False) -> Optional[Any]:
         """
         讀取指定 Node 的數值
 
@@ -339,7 +388,10 @@ class OPCHandler:
             logger.info(f"成功讀取 {node_id} = {value}")
             return value
         except Exception as e:
-            logger.error(f"讀取 Node {node_id} 失敗: {e}")
+            if suppress_errors:
+                logger.info(f"讀取 Node {node_id} 失敗（將重試）: {e}")
+            else:
+                logger.error(f"讀取 Node {node_id} 失敗: {e}")
             return None
 
     async def browse_nodes(self, node_id: str = None) -> list:

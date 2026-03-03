@@ -44,6 +44,11 @@
 - `idx_schedules_node_id (node_id)`
 - `idx_schedules_next_time (next_execution_time)`
 
+執行期注意事項（v3.0.0）：
+
+- 執行器於每次輪詢都會重新讀取該筆 `schedules`，因此此表的核心欄位更新可立即生效（不需重啟程式）。
+- 若 `is_enabled` 於執行中被改為 `0`，當前任務會在下一次輪詢時停止。
+
 ---
 
 ### 2) schedule_exceptions（單次例外）
@@ -88,6 +93,14 @@
 - `is_enabled INTEGER DEFAULT 1`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+
+---
+
+執行期注意事項（v3.0.0）：
+
+- 執行器每次輪詢會即時查詢是否命中假日規則。
+- 若命中規則且 `override_target_value` 非空，該次 OPC 寫值會使用覆寫值。
+- 排程 `ignore_holiday = 1` 時，忽略假日覆寫。
 
 ---
 
@@ -166,3 +179,7 @@
 本次更新已納入：
 
 - 若 `general_settings` 缺少 `time_scale_minutes`，會自動 `ALTER TABLE` 補上（預設 `60`）。
+
+另補充執行行為（非 schema migration）：
+
+- Scheduler 在排程或假日設定變更後可被重啟，以確保新規則立即接手。

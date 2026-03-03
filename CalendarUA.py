@@ -357,8 +357,11 @@ class SchedulerWorker(QThread):
                 schedules = self.db_manager.get_all_schedules(enabled_only=True)
 
                 for schedule in schedules:
-                    if self.should_trigger(schedule, current_time):
-                        self.trigger_task.emit(schedule)
+                    trigger_time = self.should_trigger(schedule, current_time)
+                    if trigger_time is not None:
+                        schedule_payload = dict(schedule)
+                        schedule_payload["_trigger_time"] = trigger_time
+                        self.trigger_task.emit(schedule_payload)
 
                 self.last_check = current_time
 
@@ -372,25 +375,62 @@ class SchedulerWorker(QThread):
                 print(f"排程檢查錯誤: {e}")
                 self.msleep(5000)
 
-    def should_trigger(self, schedule: Dict[str, Any], current_time: datetime) -> bool:
-        """檢查是否應該觸發排程"""
+    def _parse_duration_minutes(self, rrule_str: str) -> int:
+        """從 RRULE 解析 DURATION（分鐘）。"""
+        if not rrule_str:
+            return 0
+
+        try:
+            match = re.search(r"DURATION=PT(?:(\d+)H)?(?:(\d+)M)?", rrule_str.upper())
+            if not match:
+                return 0
+            hours = int(match.group(1) or 0)
+            minutes = int(match.group(2) or 0)
+            return max(0, hours * 60 + minutes)
+        except Exception:
+            return 0
+
+    def should_trigger(self, schedule: Dict[str, Any], current_time: datetime) -> Optional[datetime]:
+        """檢查是否應該觸發排程，回傳本次 occurrence 開始時間。"""
         schedule_id = schedule.get("id")
         rrule_str = schedule.get("rrule_str", "")
         if not rrule_str:
-            return False
+            return None
 
-        # 檢查是否已經在最近60秒內觸發過，防止重複觸發
+        tolerance_seconds = 30
+        trigger_anchor: Optional[datetime] = None
+
+        # 正常情況：檢查上次輪詢到現在之間是否有新觸發。
+        check_start = max(self.last_check, current_time - timedelta(seconds=tolerance_seconds))
+        near_triggers = RRuleParser.get_trigger_between(
+            rrule_str,
+            check_start,
+            current_time,
+        )
+        if near_triggers:
+            trigger_anchor = max(near_triggers)
+
+        # 啟動回補：若第一次看到此排程且有 DURATION，回補目前期間內最近一次觸發。
+        if trigger_anchor is None and schedule_id not in self.last_trigger_times:
+            duration_minutes = self._parse_duration_minutes(rrule_str)
+            if duration_minutes > 0:
+                window_start = current_time - timedelta(minutes=duration_minutes)
+                candidate_triggers = RRuleParser.get_trigger_between(rrule_str, window_start, current_time)
+                if candidate_triggers:
+                    latest_trigger = max(candidate_triggers)
+                    if latest_trigger <= current_time < latest_trigger + timedelta(minutes=duration_minutes):
+                        trigger_anchor = latest_trigger
+
+        if trigger_anchor is None:
+            return None
+
+        # 以 occurrence 開始時間防止重複觸發（不是用「現在時間」）
         last_trigger = self.last_trigger_times.get(schedule_id)
-        if last_trigger and (current_time - last_trigger).total_seconds() < 60:
-            return False
+        if isinstance(last_trigger, datetime) and last_trigger == trigger_anchor:
+            return None
 
-        # 使用 RRuleParser 檢查是否為觸發時間
-        if RRuleParser.is_trigger_time(rrule_str, current_time, tolerance_seconds=30):
-            # 記錄觸發時間
-            self.last_trigger_times[schedule_id] = current_time
-            return True
-
-        return False
+        self.last_trigger_times[schedule_id] = trigger_anchor
+        return trigger_anchor
 
     def stop(self):
         """停止工作執行緒"""
@@ -2193,6 +2233,7 @@ class CalendarUA(QMainWindow):
                 if success:
                     QMessageBox.information(self, "成功", "排程已更新")
                     self.load_schedules()
+                    self._restart_scheduler_worker()
                 else:
                     QMessageBox.critical(self, "錯誤", "更新排程失敗")
 
@@ -2329,6 +2370,7 @@ class CalendarUA(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.holiday_entries = self.db_manager.get_all_holiday_entries()
             self._refresh_main_calendar_views()
+            self._restart_scheduler_worker()
             self.status_bar.showMessage("假日設定已更新", 3000)
 
     def new_project(self):
@@ -2396,11 +2438,27 @@ class CalendarUA(QMainWindow):
             self.scheduler_worker.start()
             self.status_bar.showMessage("排程器已啟動")
 
+    def _restart_scheduler_worker(self):
+        """重啟排程背景工作，讓設定變更立即生效。"""
+        if not self.db_manager:
+            return
+
+        if self.scheduler_worker:
+            self.scheduler_worker.stop()
+            self.scheduler_worker.wait()
+
+        self.scheduler_worker = SchedulerWorker(self.db_manager)
+        self.scheduler_worker.trigger_task.connect(self.on_task_triggered)
+        self.scheduler_worker.start()
+        self.status_bar.showMessage("排程器已重新載入設定", 3000)
+
     @Slot(dict)
     def on_task_triggered(self, schedule: Dict[str, Any]):
         """處理排程觸發"""
         schedule_id = schedule.get("id")
-        trigger_time = datetime.now()
+        trigger_time = schedule.get("_trigger_time")
+        if not isinstance(trigger_time, datetime):
+            trigger_time = datetime.now()
         
         # 檢查是否已經在執行，防止重複執行
         if schedule_id in self.running_tasks:
@@ -2415,49 +2473,58 @@ class CalendarUA(QMainWindow):
         # 執行 OPC UA 寫入
         asyncio.create_task(self.execute_task(schedule, trigger_time=trigger_time))
 
+    def _extract_actual_node_id(self, node_id: Any) -> str:
+        """解析 node_id，提取實際的 OPC UA Node ID。"""
+        import re
+
+        node_id_text = str(node_id).strip()
+
+        std_nodeid_match = re.search(r"(ns=\d+;(?:s|i|g|b)=[^|\s]+)", node_id_text)
+        if std_nodeid_match:
+            return std_nodeid_match.group(1).strip()
+
+        if "|" in node_id_text:
+            return node_id_text.split("|")[-1].strip()
+
+        match = re.search(r"Identifier='([^']+)'", node_id_text)
+        if match:
+            identifier = match.group(1)
+            ns_match = re.search(r"NamespaceIndex=(\d+)", node_id_text)
+            type_match = re.search(r"NodeIdType=<NodeIdType\.(\w+):", node_id_text)
+            if ns_match and type_match:
+                ns = ns_match.group(1)
+                node_type = type_match.group(1)
+                if node_type == "String":
+                    return f"ns={ns};s={identifier}"
+                if node_type == "Numeric":
+                    return f"ns={ns};i={identifier}"
+            return identifier
+
+        return node_id_text
+
+    def _get_runtime_target_value(self, runtime_schedule: Dict[str, Any], base_target_value: Any, now: datetime) -> str:
+        """依據最新假日設定解析本次實際要寫入的 target value。"""
+        resolved = str(base_target_value)
+
+        if not self.db_manager:
+            return resolved
+
+        if bool(runtime_schedule.get("ignore_holiday", 0)):
+            return resolved
+
+        holiday_rule = self.db_manager.is_holiday_on_date(now.date())
+        if holiday_rule and holiday_rule.get("override_target_value") not in (None, ""):
+            return str(holiday_rule.get("override_target_value"))
+
+        return resolved
+
     async def execute_task(self, schedule: Dict[str, Any], trigger_time: Optional[datetime] = None):
         """執行排程任務"""
         schedule_id = schedule.get("id")
-        opc_url = schedule.get("opc_url", "")
-        node_id = schedule.get("node_id", "")
-        target_value = schedule.get("target_value", "")
-        data_type = schedule.get("data_type", "auto")
-        lock_enabled = bool(schedule.get("lock_enabled", 0))
         effective_trigger_time = (trigger_time or datetime.now()).replace(microsecond=0)
 
-        # 解析 node_id，提取實際的 OPC UA Node ID
-        import re
-        if "|" in node_id:
-            _, temp = node_id.split("|", 1)
-            actual_node_id = temp
-        else:
-            # 嘗試從 NodeId 字串表示提取
-            match = re.search(r"Identifier='([^']+)'", node_id)
-            if match:
-                identifier = match.group(1)
-                # 從 NodeId 字串提取 namespace 和類型資訊
-                ns_match = re.search(r"NamespaceIndex=(\d+)", node_id)
-                type_match = re.search(r"NodeIdType=<NodeIdType\.(\w+):", node_id)
-                if ns_match and type_match:
-                    ns = ns_match.group(1)
-                    node_type = type_match.group(1)
-                    if node_type == "String":
-                        actual_node_id = f"ns={ns};s={identifier}"
-                    elif node_type == "Numeric":
-                        actual_node_id = f"ns={ns};i={identifier}"
-                    else:
-                        actual_node_id = identifier
-                else:
-                    actual_node_id = identifier
-            else:
-                actual_node_id = node_id
-
-        # 取得OPC設定
-        security_policy = schedule.get("opc_security_policy", "None")
-        username = schedule.get("opc_username", "")
-        password = schedule.get("opc_password", "")
-        timeout = schedule.get("opc_timeout", 5)
-        write_timeout = schedule.get("opc_write_timeout", 3)
+        handler: Optional[OPCHandler] = None
+        connection_signature: Optional[tuple] = None
 
         try:
             # 更新狀態為執行中
@@ -2467,108 +2534,161 @@ class CalendarUA(QMainWindow):
             # 重新載入表格以顯示狀態更新
             self.load_schedules()
 
-            # 建立OPCHandler並設定安全參數
-            handler = OPCHandler(opc_url, timeout=timeout)
+            attempt = 0
+            success_once = False
+            lock_poll_interval = 1
+            lock_enabled = bool(schedule.get("lock_enabled", 0))
+            duration_minutes = self._parse_duration_from_rrule(schedule.get("rrule_str", ""))
+            status_msg = ""
 
-            # 設定安全策略
-            if security_policy != "None":
-                handler.security_policy = security_policy
+            while True:
+                runtime_schedule = schedule
+                if self.db_manager:
+                    latest_schedule = self.db_manager.get_schedule(int(schedule_id))
+                    if latest_schedule:
+                        runtime_schedule = latest_schedule
 
-            # 設定認證
-            if username:
-                handler.username = username
-                handler.password = password
+                if not bool(runtime_schedule.get("is_enabled", 1)):
+                    status_msg = "排程已停用，停止執行"
+                    break
 
-            async with handler:
-                if handler.is_connected:
-                    duration_minutes = self._parse_duration_from_rrule(schedule.get("rrule_str", ""))
-                    retry_delay = max(1, int(write_timeout or 1))
-                    period_end_time = effective_trigger_time + timedelta(minutes=duration_minutes)
+                opc_url = runtime_schedule.get("opc_url", "")
+                node_id = runtime_schedule.get("node_id", "")
+                target_value = runtime_schedule.get("target_value", "")
+                data_type = runtime_schedule.get("data_type", "auto")
+                lock_enabled = bool(runtime_schedule.get("lock_enabled", 0))
+                security_policy = runtime_schedule.get("opc_security_policy", "None")
+                username = runtime_schedule.get("opc_username", "")
+                password = runtime_schedule.get("opc_password", "")
+                timeout = int(runtime_schedule.get("opc_timeout", 5) or 5)
+                write_timeout = int(runtime_schedule.get("opc_write_timeout", 3) or 3)
+                retry_delay = max(1, write_timeout)
+                duration_minutes = self._parse_duration_from_rrule(runtime_schedule.get("rrule_str", ""))
+                period_end_time = effective_trigger_time + timedelta(minutes=duration_minutes)
+                actual_node_id = self._extract_actual_node_id(node_id)
 
-                    attempt = 0
-                    success_once = False
+                now = datetime.now()
+                runtime_target_value = self._get_runtime_target_value(runtime_schedule, target_value, now)
+                window_expired = duration_minutes > 0 and now >= period_end_time
 
-                    while True:
-                        now = datetime.now()
-                        window_expired = duration_minutes > 0 and now >= period_end_time
+                if lock_enabled and window_expired:
+                    break
 
-                        if lock_enabled and window_expired:
+                if not lock_enabled:
+                    if duration_minutes == 0 and attempt > 0:
+                        break
+                    if duration_minutes > 0 and window_expired and attempt > 0:
+                        break
+
+                new_signature = (
+                    opc_url,
+                    security_policy,
+                    username,
+                    password,
+                    timeout,
+                )
+
+                if handler is None or connection_signature != new_signature or not handler.is_connected:
+                    if handler and handler.is_connected:
+                        await handler.disconnect()
+
+                    handler = OPCHandler(opc_url, timeout=timeout)
+                    if security_policy != "None":
+                        handler.security_policy = security_policy
+                    if username:
+                        handler.username = username
+                        handler.password = password
+
+                    connected = await handler.connect()
+                    if not connected:
+                        status_msg = f"✗ 無法連線 OPC UA: {opc_url}"
+                        if duration_minutes == 0 and not lock_enabled:
                             break
+                        if duration_minutes > 0 and datetime.now() >= period_end_time:
+                            break
+                        await asyncio.sleep(retry_delay)
+                        continue
+
+                    connection_signature = new_signature
+
+                attempt += 1
+
+                try:
+                    if lock_enabled and duration_minutes > 0 and success_once:
+                        current_value = await handler.read_node(actual_node_id, suppress_errors=True)
+                        if current_value is None:
+                            status_msg = f"Lock 監控讀值暫時失敗，改以寫入維持鎖定: {node_id}"
+                            logger.info("Lock 監控讀值暫時失敗，改以寫入維持鎖定")
+                        elif self._is_target_value_matched(current_value, runtime_target_value, data_type):
+                            status_msg = f"Lock 生效中，{node_id} 值正常，持續監控到 {period_end_time.strftime('%H:%M:%S')}"
+                            await asyncio.sleep(lock_poll_interval)
+                            continue
+
+                    success = await handler.write_node(actual_node_id, runtime_target_value, data_type)
+                    if success:
+                        success_once = True
 
                         if not lock_enabled:
-                            if duration_minutes == 0 and attempt > 0:
-                                break
-                            if duration_minutes > 0 and window_expired and attempt > 0:
-                                break
+                            status_msg = f"✓ 成功寫入 {node_id} = {runtime_target_value}"
+                            break
 
-                        attempt += 1
+                        if duration_minutes <= 0:
+                            status_msg = f"✓ 成功寫入 {node_id} = {runtime_target_value}"
+                            break
 
-                        try:
-                            success = await handler.write_node(actual_node_id, target_value, data_type)
-                            if success:
-                                success_once = True
+                        status_msg = f"Lock 生效中，持續鎖定 {node_id} 到 {period_end_time.strftime('%H:%M:%S')}"
+                        await asyncio.sleep(lock_poll_interval)
+                        continue
 
-                                if not lock_enabled:
-                                    status_msg = f"✓ 成功寫入 {node_id} = {target_value}"
-                                    break
+                    status_msg = f"✗ 寫入失敗: {node_id}"
 
-                                if duration_minutes <= 0:
-                                    status_msg = f"✓ 成功寫入 {node_id} = {target_value}"
-                                    break
+                    if duration_minutes == 0 and not lock_enabled:
+                        break
 
-                                status_msg = f"Lock 生效中，持續鎖定 {node_id} 到 {period_end_time.strftime('%H:%M:%S')}"
-                                await asyncio.sleep(retry_delay)
-                                continue
+                    if duration_minutes > 0 and datetime.now() >= period_end_time:
+                        break
 
-                            status_msg = f"✗ 寫入失敗: {node_id}"
+                    logger.warning(f"寫入失敗，等待 {retry_delay} 秒後重試")
+                    await asyncio.sleep(retry_delay)
+                    continue
 
-                            if duration_minutes == 0 and not lock_enabled:
-                                break
+                except Exception as e:
+                    status_msg = f"✗ 執行錯誤: {str(e)[:50]}"
 
-                            if duration_minutes > 0 and datetime.now() >= period_end_time:
-                                break
+                    if duration_minutes == 0 and not lock_enabled:
+                        break
 
-                            logger.warning(f"寫入失敗，等待 {retry_delay} 秒後重試")
-                            await asyncio.sleep(retry_delay)
-                            continue
+                    if duration_minutes > 0 and datetime.now() >= period_end_time:
+                        break
 
-                        except Exception as e:
-                            status_msg = f"✗ 執行錯誤: {str(e)[:50]}"
+                    logger.warning(f"寫入錯誤: {e}，等待 {retry_delay} 秒後重試")
+                    await asyncio.sleep(retry_delay)
+                    continue
 
-                            if duration_minutes == 0 and not lock_enabled:
-                                break
-
-                            if duration_minutes > 0 and datetime.now() >= period_end_time:
-                                break
-
-                            logger.warning(f"寫入錯誤: {e}，等待 {retry_delay} 秒後重試")
-                            await asyncio.sleep(retry_delay)
-                            continue
-
-                    if success_once:
-                        if self.db_manager:
-                            if lock_enabled and duration_minutes > 0:
-                                self.db_manager.update_execution_status(schedule_id, "鎖定期間完成")
-                            else:
-                                self.db_manager.update_execution_status(schedule_id, "執行成功")
-
-                        # 增加執行計數器
-                        self.execution_counts[schedule_id] = self.execution_counts.get(schedule_id, 0) + 1
-                        # 檢查是否達到 COUNT 上限
-                        self._check_and_disable_if_count_reached(schedule_id, schedule.get("rrule_str", ""))
+            if success_once:
+                if self.db_manager:
+                    if lock_enabled and duration_minutes > 0:
+                        self.db_manager.update_execution_status(schedule_id, "鎖定期間完成")
                     else:
-                        if self.db_manager:
-                            self.db_manager.update_execution_status(schedule_id, "寫入失敗")
-                        status_msg = f"✗ 寫入失敗: {node_id}"
-                else:
-                    status_msg = f"✗ 無法連線 OPC UA: {opc_url}"
-                    if self.db_manager:
-                        self.db_manager.update_execution_status(schedule_id, "連線失敗")
+                        self.db_manager.update_execution_status(schedule_id, "執行成功")
+
+                # 增加執行計數器
+                self.execution_counts[schedule_id] = self.execution_counts.get(schedule_id, 0) + 1
+                # 檢查是否達到 COUNT 上限
+                self._check_and_disable_if_count_reached(schedule_id, schedule.get("rrule_str", ""))
+            else:
+                if self.db_manager:
+                    self.db_manager.update_execution_status(schedule_id, "寫入失敗")
+                if not status_msg:
+                    status_msg = "✗ 寫入失敗"
                         
         except Exception as e:
             status_msg = f"✗ 執行錯誤: {str(e)}"
             if self.db_manager:
                 self.db_manager.update_execution_status(schedule_id, f"執行錯誤: {str(e)[:50]}")
+        finally:
+            if handler and handler.is_connected:
+                await handler.disconnect()
 
         # 更新狀態列和重新載入表格
         self.status_bar.showMessage(status_msg, 5000)
@@ -2576,6 +2696,45 @@ class CalendarUA(QMainWindow):
         
         # 從執行中任務集合中移除
         self.running_tasks.discard(schedule_id)
+
+    def _is_target_value_matched(self, current_value: Any, target_value: Any, data_type: str) -> bool:
+        """比較目前讀值是否已符合目標值。"""
+        target_text = str(target_value).strip()
+
+        def parse_bool(text: str) -> Optional[bool]:
+            lowered = text.lower()
+            if lowered in ("true", "1", "on", "yes"):
+                return True
+            if lowered in ("false", "0", "off", "no"):
+                return False
+            return None
+
+        try:
+            if data_type == "bool":
+                parsed = parse_bool(target_text)
+                if parsed is None:
+                    return bool(current_value) == bool(target_text)
+                return bool(current_value) == parsed
+
+            if data_type == "int":
+                return int(float(current_value)) == int(float(target_text))
+
+            if data_type == "float":
+                return abs(float(current_value) - float(target_text)) < 1e-6
+
+            if data_type == "string":
+                return str(current_value).strip() == target_text
+
+            parsed_bool = parse_bool(target_text)
+            if parsed_bool is not None and isinstance(current_value, (bool, int)):
+                return bool(current_value) == parsed_bool
+
+            try:
+                return abs(float(current_value) - float(target_text)) < 1e-6
+            except (TypeError, ValueError):
+                return str(current_value).strip() == target_text
+        except Exception:
+            return str(current_value).strip() == target_text
 
     def _parse_duration_from_rrule(self, rrule_str: str) -> int:
         """從RRULE字串中解析期間參數（分鐘）"""
@@ -4360,7 +4519,10 @@ def main():
 
     # 執行事件迴圈
     with loop:
-        loop.run_forever()
+        try:
+            loop.run_forever()
+        except KeyboardInterrupt:
+            logger.info("收到中斷訊號，正在結束程式")
 
 
 if __name__ == "__main__":
