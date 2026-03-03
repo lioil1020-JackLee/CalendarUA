@@ -342,69 +342,6 @@ class OPCHandler:
             logger.error(f"讀取 Node {node_id} 失敗: {e}")
             return None
 
-    async def read_node_data_type(self, node_id: str) -> Optional[str]:
-        """
-        讀取指定 Node 的資料型別
-
-        Args:
-            node_id: OPC UA Node ID
-
-        Returns:
-            Optional[str]: 資料型別 (int/float/string/bool/auto)，失敗回傳 None
-        """
-        if not self.is_connected or not self.client:
-            logger.error("尚未連線到 OPC UA 伺服器")
-            return None
-
-        try:
-            node = self.client.get_node(node_id)
-            
-            # 讀取 VariantType
-            variant_type = await node.read_data_type_as_variant_type()
-            logger.info(f"成功讀取 {node_id} 資料型別: {variant_type}")
-            
-            # 映射到簡單型別系統
-            return self._map_variant_type_to_simple_type(variant_type)
-            
-        except Exception as e:
-            logger.error(f"讀取 Node {node_id} 資料型別失敗: {e}")
-            return None
-
-    def _map_variant_type_to_simple_type(self, variant_type: ua.VariantType) -> str:
-        """
-        將 OPC UA VariantType 映射到簡單型別系統
-
-        Args:
-            variant_type: OPC UA VariantType
-
-        Returns:
-            str: 簡單型別 (int/float/string/bool/auto)
-        """
-        # 整數型別映射到 "int"
-        if variant_type in (
-            ua.VariantType.SByte, ua.VariantType.Byte,
-            ua.VariantType.Int16, ua.VariantType.UInt16,
-            ua.VariantType.Int32, ua.VariantType.UInt32,
-            ua.VariantType.Int64, ua.VariantType.UInt64
-        ):
-            return "int"
-        
-        # 浮點數型別映射到 "float"
-        elif variant_type in (ua.VariantType.Float, ua.VariantType.Double):
-            return "float"
-        
-        # 字串型別
-        elif variant_type == ua.VariantType.String:
-            return "string"
-        
-        # 布林型別
-        elif variant_type == ua.VariantType.Boolean:
-            return "bool"
-        
-        # 其他型別使用 "auto"
-        else:
-            return "auto"
-
     async def browse_nodes(self, node_id: str = None) -> list:
         """
         瀏覽 Node 的子節點

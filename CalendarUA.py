@@ -60,6 +60,7 @@ from core.rrule_parser import RRuleParser
 from core.schedule_resolver import resolve_occurrences_for_range
 from ui.recurrence_dialog import RecurrenceDialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
+from ui.holiday_settings_dialog import HolidaySettingsDialog
 from ui.schedule_canvas import DayViewWidget, WeekViewWidget
 from ui.month_grid import MonthViewWidget
 from core.lunar_calendar import to_lunar, LunarDateInfo
@@ -608,14 +609,18 @@ class CalendarUA(QMainWindow):
         view_toolbar.addWidget(self.btn_main_next)
         view_toolbar.addStretch()
 
-        # 右側按鈕區：日/週/月（可高亮）
+        # 右側按鈕區：日/週/月/假日（可高亮）
         self.btn_view_day = QPushButton("日")
         self.btn_view_week = QPushButton("週")
         self.btn_view_month = QPushButton("月")
+        self.btn_holiday_settings = QPushButton("假日")
         for btn in (self.btn_view_day, self.btn_view_week, self.btn_view_month):
             btn.setCheckable(True)
             btn.setMinimumWidth(48)
             view_toolbar.addWidget(btn)
+        self.btn_holiday_settings.setCheckable(False)
+        self.btn_holiday_settings.setMinimumWidth(48)
+        view_toolbar.addWidget(self.btn_holiday_settings)
 
         right_layout.addLayout(view_toolbar)
 
@@ -651,6 +656,7 @@ class CalendarUA(QMainWindow):
         self.btn_view_day.clicked.connect(lambda: self._set_view_mode("day"))
         self.btn_view_week.clicked.connect(lambda: self._set_view_mode("week"))
         self.btn_view_month.clicked.connect(lambda: self._set_view_mode("month"))
+        self.btn_holiday_settings.clicked.connect(self.show_holiday_settings)
 
         # 初始化導覽月份下拉選單
         self._init_nav_month_year()
@@ -880,6 +886,9 @@ class CalendarUA(QMainWindow):
         self.btn_view_day.setStyleSheet(toggle_style)
         self.btn_view_week.setStyleSheet(toggle_style)
         self.btn_view_month.setStyleSheet(toggle_style)
+
+        plain_style = toggle_style.replace("QPushButton:checked {", "QPushButton:pressed {")
+        self.btn_holiday_settings.setStyleSheet(plain_style)
 
     def _apply_light_theme(self):
         """套用亮色主題"""
@@ -1346,7 +1355,7 @@ class CalendarUA(QMainWindow):
             self.combo_nav_month.setCurrentIndex(new_base_first.month() - 1)
             year_index = self.combo_nav_year.findData(new_base_first.year())
             if year_index >= 0:
-                self.combo_nav_year.setCurrentIndex(new_base_first.year())
+                self.combo_nav_year.setCurrentIndex(year_index)
             self.combo_nav_month.blockSignals(False)
             self.combo_nav_year.blockSignals(False)
             self._update_nav_calendars(new_base_first.year(), new_base_first.month())
@@ -1935,6 +1944,7 @@ class CalendarUA(QMainWindow):
                     opc_timeout=data.get("opc_timeout", 5),
                     opc_write_timeout=data.get("opc_write_timeout", 3),
                     is_enabled=data.get("is_enabled", 1),
+                    ignore_holiday=data.get("ignore_holiday", 0),
                 )
 
                 if schedule_id:
@@ -1974,6 +1984,7 @@ class CalendarUA(QMainWindow):
                     opc_timeout=data.get("opc_timeout", 5),
                     opc_write_timeout=data.get("opc_write_timeout", 3),
                     is_enabled=data.get("is_enabled", 1),
+                    ignore_holiday=data.get("ignore_holiday", 0),
                 )
 
                 if success:
@@ -2104,6 +2115,18 @@ class CalendarUA(QMainWindow):
         dialog = DatabaseSettingsDialog(self, self.db_manager)
         dialog.database_changed.connect(self.on_database_path_changed)
         dialog.exec()
+
+    def show_holiday_settings(self):
+        """顯示假日設定對話框。"""
+        if not self.db_manager:
+            QMessageBox.warning(self, "警告", "資料庫未連線")
+            return
+
+        dialog = HolidaySettingsDialog(self.db_manager, self)
+        if dialog.exec() == QDialog.Accepted:
+            self.holiday_entries = self.db_manager.get_all_holiday_entries()
+            self._refresh_main_calendar_views()
+            self.status_bar.showMessage("假日設定已更新", 3000)
 
     def new_project(self):
         """建立新的專案資料庫（.db）。"""
@@ -2414,12 +2437,6 @@ class CalendarUA(QMainWindow):
             # 如果解析失敗，記錄錯誤但不中斷執行
             print(f"檢查 COUNT 上限失敗: {e}")
 
-    def show_db_settings(self):
-        """顯示資料庫設定對話框"""
-        dialog = DatabaseSettingsDialog(self, self.db_manager)
-        dialog.database_changed.connect(self.on_database_path_changed)
-        dialog.exec()
-
     def on_database_path_changed(self, new_path: str):
         """處理資料庫路徑變更"""
         # 重新初始化資料庫管理器
@@ -2437,18 +2454,6 @@ class CalendarUA(QMainWindow):
         self.scheduler_worker = SchedulerWorker(self.db_manager)
         self.scheduler_worker.trigger_task.connect(self.on_task_triggered)
         self.scheduler_worker.start()
-
-    def show_about(self):
-        """顯示關於對話框"""
-        QMessageBox.about(
-            self,
-            "關於 CalendarUA",
-            """<h2>CalendarUA v1.0</h2>
-            <p>工業自動化排程管理系統</p>
-            <p>採用 Python 3.12 + PySide6 開發</p>
-            <p>結合 OPC UA 與 MySQL 技術</p>
-            """,
-        )
 
     def closeEvent(self, event):
         """處理視窗關閉事件"""
@@ -3699,10 +3704,19 @@ class ScheduleEditDialog(QDialog):
         basic_layout.addLayout(type_layout, 4, 1)
 
         basic_layout.addWidget(QLabel("狀態:"), 5, 0)
+        status_layout = QHBoxLayout()
+        status_layout.setSpacing(14)
         self.enabled_checkbox = QCheckBox("啟用排程")
         self.enabled_checkbox.setChecked(True)  # 預設啟用
         self.enabled_checkbox.setToolTip("控制此排程是否會被執行")
-        basic_layout.addWidget(self.enabled_checkbox, 5, 1)
+        status_layout.addWidget(self.enabled_checkbox)
+
+        self.ignore_holiday_checkbox = QCheckBox("忽略假日")
+        self.ignore_holiday_checkbox.setChecked(False)
+        self.ignore_holiday_checkbox.setToolTip("勾選後此排程不套用假日覆寫邏輯")
+        status_layout.addWidget(self.ignore_holiday_checkbox)
+        status_layout.addStretch()
+        basic_layout.addLayout(status_layout, 5, 1)
 
         layout.addWidget(basic_group)
 
@@ -3933,6 +3947,7 @@ class ScheduleEditDialog(QDialog):
         self.original_rrule = self.schedule.get("rrule_str", "")
         
         self.enabled_checkbox.setChecked(bool(self.schedule.get("is_enabled", 1)))
+        self.ignore_holiday_checkbox.setChecked(bool(self.schedule.get("ignore_holiday", 0)))
 
     def get_data(self) -> Dict[str, Any]:
         """取得編輯的資料"""
@@ -3957,6 +3972,7 @@ class ScheduleEditDialog(QDialog):
             "opc_timeout": self.opc_timeout,
             "opc_write_timeout": self.opc_write_timeout,
             "is_enabled": 1 if self.enabled_checkbox.isChecked() else 0,
+            "ignore_holiday": 1 if self.ignore_holiday_checkbox.isChecked() else 0,
         }
 
     def on_ok_clicked(self):

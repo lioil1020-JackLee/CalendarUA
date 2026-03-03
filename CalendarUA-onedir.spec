@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
+block_cipher = None
+
 datas = []
 icon = None
 
@@ -22,6 +24,9 @@ a = Analysis(
         "PySide6.QtWidgets",
         "qasync",
         "dateutil.rrule",
+        "asyncua",
+        "asyncua.ua",
+        "lunardate",
     ],
     hookspath=[],
     hooksconfig={},
@@ -30,6 +35,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

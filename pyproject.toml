@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "CalendarUA"
-version = "2.3.0"
+name = "calendarua"
+version = "2.4.0"
 description = "CalendarUA - OPC UA schedule desktop application"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "PySide6==6.7.2",
     "asyncua==1.1.5",
@@ -16,10 +16,15 @@ dependencies = [
     "lunardate==0.2.2",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pyinstaller==6.18.0",
+]
+
 [tool.setuptools]
 packages = ["core", "database", "ui"]
 
 [dependency-groups]
 dev = [
-    "pyinstaller>=6.18.0",
+    "pyinstaller==6.18.0",
 ]

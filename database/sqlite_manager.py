@@ -9,6 +9,9 @@ from pathlib import Path
 import os
 from typing import List, Dict, Optional, Any
 from contextlib import contextmanager
+from datetime import datetime
+
+from core.lunar_calendar import to_lunar
 
 
 # 設定日誌記錄
@@ -16,6 +19,11 @@ logging.basicConfig(
     level=logging.WARNING, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_SOLAR_HOLIDAYS = [(1, 1), (2, 28), (4, 4), (4, 5), (5, 1), (10, 10)]
+DEFAULT_LUNAR_HOLIDAYS = [(12, 31), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (5, 5), (8, 15)]
+DEFAULT_WEEKDAY_HOLIDAYS = [6, 7]
 
 
 class SQLiteManager:
@@ -60,6 +68,110 @@ class SQLiteManager:
             if conn:
                 conn.close()
 
+    def _create_holidays_table(self, cursor: sqlite3.Cursor) -> None:
+        """建立單一假日設定表（整合週別與國/農曆日期）。"""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS holidays (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_type TEXT NOT NULL,
+                calendar_type TEXT,
+                month INTEGER,
+                day INTEGER,
+                weekday INTEGER,
+                name TEXT DEFAULT '',
+                override_target_value TEXT,
+                is_enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_holidays_unique_weekday ON holidays(entry_type, weekday) WHERE entry_type = 'weekday'"
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_holidays_unique_date ON holidays(entry_type, calendar_type, month, day) WHERE entry_type = 'date'"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_holidays_enabled ON holidays(is_enabled)"
+        )
+
+    def _migrate_holiday_data(self, cursor: sqlite3.Cursor) -> None:
+        """將舊版 holiday_entries 資料（YYYY-MM-DD）遷移到新 holidays 單表。"""
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='holiday_entries'"
+        )
+        if not cursor.fetchone():
+            return
+
+        cursor.execute("SELECT COUNT(1) AS cnt FROM holidays")
+        row = cursor.fetchone()
+        if row and int(row["cnt"] or 0) > 0:
+            return
+
+        cursor.execute(
+            "SELECT holiday_date, name, override_target_value FROM holiday_entries ORDER BY id"
+        )
+        legacy_rows = cursor.fetchall()
+        for legacy in legacy_rows:
+            holiday_date = str(legacy["holiday_date"] or "").strip()
+            try:
+                dt = datetime.strptime(holiday_date, "%Y-%m-%d")
+            except ValueError:
+                continue
+
+            month = dt.month
+            day = dt.day
+            name = str(legacy["name"] or "")
+            override_target_value = legacy["override_target_value"]
+
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO holidays
+                (entry_type, calendar_type, month, day, name, override_target_value, is_enabled)
+                VALUES ('date', 'solar', ?, ?, ?, ?, 1)
+                """,
+                (month, day, name, override_target_value),
+            )
+
+    def _ensure_default_holiday_rules(self, cursor: sqlite3.Cursor) -> None:
+        """若假日規則為空，補上預設週六/週日與國定/農曆日期。"""
+        cursor.execute("SELECT COUNT(1) AS cnt FROM holidays WHERE is_enabled = 1")
+        row = cursor.fetchone()
+        if row and int(row["cnt"] or 0) > 0:
+            return
+
+        for weekday in DEFAULT_WEEKDAY_HOLIDAYS:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO holidays
+                (entry_type, weekday, name, is_enabled)
+                VALUES ('weekday', ?, ?, 1)
+                """,
+                (weekday, f"週{weekday}假日"),
+            )
+
+        for month, day in DEFAULT_SOLAR_HOLIDAYS:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO holidays
+                (entry_type, calendar_type, month, day, name, is_enabled)
+                VALUES ('date', 'solar', ?, ?, '', 1)
+                """,
+                (month, day),
+            )
+
+        for month, day in DEFAULT_LUNAR_HOLIDAYS:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO holidays
+                (entry_type, calendar_type, month, day, name, is_enabled)
+                VALUES ('date', 'lunar', ?, ?, '', 1)
+                """,
+                (month, day),
+            )
+
     def init_db(self) -> bool:
         """
         初始化資料庫
@@ -84,6 +196,7 @@ class SQLiteManager:
             opc_password TEXT DEFAULT '',
             opc_timeout INTEGER DEFAULT 10,
             is_enabled INTEGER DEFAULT 1,
+            ignore_holiday INTEGER DEFAULT 0,
             last_execution_status TEXT DEFAULT '',
             last_execution_time TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -115,37 +228,8 @@ class SQLiteManager:
                     """
                 )
 
-                # 創建 holiday_calendars 表
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS holiday_calendars (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT UNIQUE NOT NULL,
-                        description TEXT,
-                        is_default INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-
-                # 創建 holiday_entries 表
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS holiday_entries (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        calendar_id INTEGER NOT NULL,
-                        holiday_date TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        is_full_day INTEGER DEFAULT 1,
-                        start_time TEXT,
-                        end_time TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(calendar_id) REFERENCES holiday_calendars(id) ON DELETE CASCADE
-                    )
-                    """
-                )
+                # 假日統一採單一 holidays 表
+                self._create_holidays_table(cursor)
 
                 # 創建 general_settings 表
                 cursor.execute(
@@ -201,6 +285,10 @@ class SQLiteManager:
                     cursor.execute("ALTER TABLE schedules ADD COLUMN last_execution_time TIMESTAMP")
                     logger.info("已添加 last_execution_time 欄位")
 
+                if 'ignore_holiday' not in columns:
+                    cursor.execute("ALTER TABLE schedules ADD COLUMN ignore_holiday INTEGER DEFAULT 0")
+                    logger.info("已添加 ignore_holiday 欄位")
+
                 # 建立索引以提升查詢效能
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(is_enabled)"
@@ -211,6 +299,10 @@ class SQLiteManager:
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_schedule_exceptions_schedule_date ON schedule_exceptions(schedule_id, occurrence_date)"
                 )
+
+                # 假日資料遷移與預設資料
+                self._migrate_holiday_data(cursor)
+                self._ensure_default_holiday_rules(cursor)
 
                 conn.commit()
                 logger.info("資料庫初始化成功，schedules 表格已建立")
@@ -292,6 +384,12 @@ class SQLiteManager:
                     )
                     logger.info("已添加 next_execution_time 欄位")
 
+                if "ignore_holiday" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN ignore_holiday INTEGER DEFAULT 0"
+                    )
+                    logger.info("已添加 ignore_holiday 欄位")
+
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS schedule_exceptions (
@@ -313,40 +411,8 @@ class SQLiteManager:
                     "CREATE INDEX IF NOT EXISTS idx_schedule_exceptions_schedule_date ON schedule_exceptions(schedule_id, occurrence_date)"
                 )
 
-                # 創建 holiday_calendars 表
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS holiday_calendars (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT UNIQUE NOT NULL,
-                        description TEXT,
-                        is_default INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-
-                # 創建 holiday_entries 表
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS holiday_entries (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        calendar_id INTEGER NOT NULL,
-                        holiday_date TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        is_full_day INTEGER DEFAULT 1,
-                        start_time TEXT,
-                        end_time TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(calendar_id) REFERENCES holiday_calendars(id) ON DELETE CASCADE
-                    )
-                    """
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_holiday_entries_calendar_date ON holiday_entries(calendar_id, holiday_date)"
-                )
+                # 假日統一採單一 holidays 表
+                self._create_holidays_table(cursor)
                 
                 cursor.execute("PRAGMA table_info(schedules)")
                 schedules_columns = [column[1] for column in cursor.fetchall()]
@@ -377,13 +443,17 @@ class SQLiteManager:
                     )
                     logger.info("已添加 schedule_exceptions.note 欄位")
 
-                cursor.execute("PRAGMA table_info(holiday_entries)")
-                holiday_entries_columns = [column[1] for column in cursor.fetchall()]
-                if "override_target_value" not in holiday_entries_columns:
-                    cursor.execute(
-                        "ALTER TABLE holiday_entries ADD COLUMN override_target_value TEXT"
-                    )
-                    logger.info("已添加 holiday_entries.override_target_value 欄位")
+                cursor.execute("PRAGMA table_info(holidays)")
+                holiday_columns = [column[1] for column in cursor.fetchall()]
+                if "override_target_value" not in holiday_columns:
+                    cursor.execute("ALTER TABLE holidays ADD COLUMN override_target_value TEXT")
+                    logger.info("已添加 holidays.override_target_value 欄位")
+                if "is_enabled" not in holiday_columns:
+                    cursor.execute("ALTER TABLE holidays ADD COLUMN is_enabled INTEGER DEFAULT 1")
+                    logger.info("已添加 holidays.is_enabled 欄位")
+
+                self._migrate_holiday_data(cursor)
+                self._ensure_default_holiday_rules(cursor)
 
                 cursor.execute("PRAGMA table_info(general_settings)")
                 general_columns = [column[1] for column in cursor.fetchall()]
@@ -435,6 +505,7 @@ class SQLiteManager:
         opc_timeout: int = 5,
         opc_write_timeout: int = 3,
         is_enabled: int = 1,
+        ignore_holiday: int = 0,
     ) -> Optional[int]:
         """
         新增排程資料
@@ -453,14 +524,15 @@ class SQLiteManager:
             opc_timeout: 連線超時秒數
             opc_write_timeout: 寫值重試延遲秒數
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
+            ignore_holiday: 是否忽略假日規則 (1: 忽略, 0: 不忽略)
 
         Returns:
             Optional[int]: 新增排程的 ID，失敗時回傳 None
         """
         insert_sql = """
         INSERT INTO schedules (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled, ignore_holiday)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         try:
@@ -469,7 +541,7 @@ class SQLiteManager:
                 cursor.execute(
                     insert_sql,
                     (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled),
+                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled, ignore_holiday),
                 )
                 conn.commit()
                 new_id = cursor.lastrowid
@@ -561,6 +633,7 @@ class SQLiteManager:
         opc_timeout: int = 5,
         opc_write_timeout: int = 3,
         is_enabled: int = 1,
+        ignore_holiday: int = 0,
     ) -> Optional[int]:
         """
         新增排程（add_schedule 的別名，與舊版介面相容）
@@ -578,6 +651,7 @@ class SQLiteManager:
             opc_timeout: 連線超時秒數
             opc_write_timeout: 寫值重試延遲秒數
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
+            ignore_holiday: 是否忽略假日規則 (1: 忽略, 0: 不忽略)
 
         Returns:
             Optional[int]: 新增排程的 ID，失敗時回傳 None
@@ -596,6 +670,7 @@ class SQLiteManager:
             opc_timeout=opc_timeout,
             opc_write_timeout=opc_write_timeout,
             is_enabled=is_enabled,
+            ignore_holiday=ignore_holiday,
         )
 
     def get_schedule(self, schedule_id: int) -> Optional[Dict[str, Any]]:
@@ -651,6 +726,7 @@ class SQLiteManager:
             "opc_timeout",
             "opc_write_timeout",
             "is_enabled",
+            "ignore_holiday",
             "last_execution_status",
             "last_execution_time",
         }
@@ -867,64 +943,20 @@ class SQLiteManager:
     # ==================== Holiday Calendars CRUD ====================
 
     def add_holiday_calendar(self, name: str, description: str = "", is_default: int = 0) -> Optional[int]:
-        """新增假日日曆"""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO holiday_calendars (name, description, is_default)
-                    VALUES (?, ?, ?)
-                    """,
-                    (name, description, is_default),
-                )
-                conn.commit()
-                return cursor.lastrowid
-        except sqlite3.Error as e:
-            logger.error(f"新增 holiday calendar 失敗: {e}")
-            return None
+        """相容舊介面：單表模式不再使用 calendar，回傳固定 ID。"""
+        return 1
 
     def get_all_holiday_calendars(self) -> List[Dict[str, Any]]:
-        """查詢所有假日日曆"""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM holiday_calendars ORDER BY is_default DESC, name")
-                return [dict(row) for row in cursor.fetchall()]
-        except sqlite3.Error as e:
-            logger.error(f"查詢 holiday calendars 失敗: {e}")
-            return []
+        """相容舊介面：回傳單一內建假日日曆。"""
+        return [{"id": 1, "name": "預設假日", "description": "單表模式", "is_default": 1}]
 
     def update_holiday_calendar(self, calendar_id: int, name: str, description: str = "", is_default: int = 0) -> bool:
-        """更新假日日曆"""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE holiday_calendars
-                    SET name = ?, description = ?, is_default = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (name, description, is_default, calendar_id),
-                )
-                conn.commit()
-                return cursor.rowcount > 0
-        except sqlite3.Error as e:
-            logger.error(f"更新 holiday calendar 失敗: {e}")
-            return False
+        """相容舊介面：單表模式無此操作。"""
+        return True
 
     def delete_holiday_calendar(self, calendar_id: int) -> bool:
-        """刪除假日日曆（CASCADE 會自動刪除關聯的 entries）"""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM holiday_calendars WHERE id = ?", (calendar_id,))
-                conn.commit()
-                return cursor.rowcount > 0
-        except sqlite3.Error as e:
-            logger.error(f"刪除 holiday calendar 失敗: {e}")
-            return False
+        """相容舊介面：單表模式無此操作。"""
+        return False
 
     # ==================== Holiday Entries CRUD ====================
 
@@ -937,43 +969,41 @@ class SQLiteManager:
         start_time: str = None,
         end_time: str = None,
     ) -> Optional[int]:
-        """新增假日條目"""
+        """新增假日條目（舊介面：接受 YYYY-MM-DD，轉存成國曆月/日規則）。"""
+        try:
+            dt = datetime.strptime(holiday_date, "%Y-%m-%d")
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO holidays (entry_type, calendar_type, month, day, name, is_enabled)
+                    VALUES ('date', 'solar', ?, ?, ?, 1)
+                    """,
+                    (dt.month, dt.day, name),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except (ValueError, sqlite3.Error) as e:
+            logger.error(f"新增 holiday entry 失敗: {e}")
+            return None
+
+    def get_holiday_entries_by_calendar(self, calendar_id: int) -> List[Dict[str, Any]]:
+        """相容舊介面：單表模式忽略 calendar_id，回傳全部規則。"""
+        return self.get_all_holiday_entries()
+
+    def get_all_holiday_entries(self) -> List[Dict[str, Any]]:
+        """查詢所有假日規則（單表）。"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    INSERT INTO holiday_entries (calendar_id, holiday_date, name, is_full_day, start_time, end_time)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (calendar_id, holiday_date, name, is_full_day, start_time, end_time),
+                    SELECT *
+                    FROM holidays
+                    WHERE is_enabled = 1
+                    ORDER BY CASE entry_type WHEN 'weekday' THEN 0 ELSE 1 END, calendar_type, month, day, weekday
+                    """
                 )
-                conn.commit()
-                return cursor.lastrowid
-        except sqlite3.Error as e:
-            logger.error(f"新增 holiday entry 失敗: {e}")
-            return None
-
-    def get_holiday_entries_by_calendar(self, calendar_id: int) -> List[Dict[str, Any]]:
-        """查詢指定日曆的所有假日條目"""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT * FROM holiday_entries WHERE calendar_id = ? ORDER BY holiday_date",
-                    (calendar_id,),
-                )
-                return [dict(row) for row in cursor.fetchall()]
-        except sqlite3.Error as e:
-            logger.error(f"查詢 holiday entries 失敗: {e}")
-            return []
-
-    def get_all_holiday_entries(self) -> List[Dict[str, Any]]:
-        """查詢所有假日條目"""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM holiday_entries ORDER BY holiday_date DESC")
                 return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             logger.error(f"查詢所有 holiday entries 失敗: {e}")
@@ -988,21 +1018,22 @@ class SQLiteManager:
         start_time: str = None,
         end_time: str = None,
     ) -> bool:
-        """更新假日條目"""
+        """更新假日條目（舊介面：更新為國曆月/日規則）。"""
         try:
+            dt = datetime.strptime(holiday_date, "%Y-%m-%d")
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
-                    UPDATE holiday_entries
-                    SET holiday_date = ?, name = ?, is_full_day = ?, start_time = ?, end_time = ?, updated_at = CURRENT_TIMESTAMP
+                    UPDATE holidays
+                    SET entry_type = 'date', calendar_type = 'solar', month = ?, day = ?, name = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (holiday_date, name, is_full_day, start_time, end_time, entry_id),
+                    (dt.month, dt.day, name, entry_id),
                 )
                 conn.commit()
                 return cursor.rowcount > 0
-        except sqlite3.Error as e:
+        except (ValueError, sqlite3.Error) as e:
             logger.error(f"更新 holiday entry 失敗: {e}")
             return False
 
@@ -1011,12 +1042,174 @@ class SQLiteManager:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("DELETE FROM holiday_entries WHERE id = ?", (entry_id,))
+                cursor.execute("DELETE FROM holidays WHERE id = ?", (entry_id,))
                 conn.commit()
                 return cursor.rowcount > 0
         except sqlite3.Error as e:
             logger.error(f"刪除 holiday entry 失敗: {e}")
             return False
+
+    def set_weekday_holidays(self, weekdays: List[int]) -> bool:
+        """設定週幾為假日（1=週一 ... 7=週日）。"""
+        normalized = sorted({int(w) for w in weekdays if 1 <= int(w) <= 7})
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM holidays WHERE entry_type = 'weekday'")
+                for weekday in normalized:
+                    cursor.execute(
+                        """
+                        INSERT INTO holidays (entry_type, weekday, name, is_enabled)
+                        VALUES ('weekday', ?, ?, 1)
+                        """,
+                        (weekday, f"週{weekday}假日"),
+                    )
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"設定 weekday 假日失敗: {e}")
+            return False
+
+    def add_holiday_rule(self, calendar_type: str, month: int, day: int, name: str = "") -> Optional[int]:
+        """新增日期型假日規則（calendar_type: solar/lunar）。"""
+        if calendar_type not in {"solar", "lunar"}:
+            return None
+        if month < 1 or month > 12 or day < 1 or day > 31:
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO holidays (entry_type, calendar_type, month, day, name, is_enabled)
+                    VALUES ('date', ?, ?, ?, ?, 1)
+                    """,
+                    (calendar_type, month, day, name),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+        except sqlite3.Error as e:
+            logger.error(f"新增 holiday rule 失敗: {e}")
+            return None
+
+    def update_holiday_rule(self, rule_id: int, calendar_type: str, month: int, day: int, name: str = "") -> bool:
+        """更新日期型假日規則。"""
+        if calendar_type not in {"solar", "lunar"}:
+            return False
+        if month < 1 or month > 12 or day < 1 or day > 31:
+            return False
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE holidays
+                    SET entry_type = 'date', calendar_type = ?, month = ?, day = ?, name = ?, is_enabled = 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (calendar_type, month, day, name, rule_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+        except sqlite3.Error as e:
+            logger.error(f"更新 holiday rule 失敗: {e}")
+            return False
+
+    def replace_holiday_rules(self, weekdays: List[int], date_rules: List[Dict[str, Any]]) -> bool:
+        """以整包資料覆蓋假日規則。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM holidays")
+
+                normalized = sorted({int(w) for w in weekdays if 1 <= int(w) <= 7})
+                for weekday in normalized:
+                    cursor.execute(
+                        "INSERT INTO holidays (entry_type, weekday, name, is_enabled) VALUES ('weekday', ?, ?, 1)",
+                        (weekday, f"週{weekday}假日"),
+                    )
+
+                for rule in date_rules:
+                    calendar_type = str(rule.get("calendar_type", "")).strip().lower()
+                    month = int(rule.get("month", 0) or 0)
+                    day = int(rule.get("day", 0) or 0)
+                    name = str(rule.get("name", "") or "")
+                    if calendar_type not in {"solar", "lunar"}:
+                        continue
+                    if month < 1 or month > 12 or day < 1 or day > 31:
+                        continue
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO holidays (entry_type, calendar_type, month, day, name, is_enabled)
+                        VALUES ('date', ?, ?, ?, ?, 1)
+                        """,
+                        (calendar_type, month, day, name),
+                    )
+
+                self._ensure_default_holiday_rules(cursor)
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"覆蓋 holiday rules 失敗: {e}")
+            return False
+
+    def get_holiday_rules_payload(self) -> Dict[str, Any]:
+        """輸出匯入/匯出的假日設定資料。"""
+        entries = self.get_all_holiday_entries()
+        weekdays: List[int] = []
+        dates: List[Dict[str, Any]] = []
+        for entry in entries:
+            if entry.get("entry_type") == "weekday":
+                weekday = int(entry.get("weekday", 0) or 0)
+                if 1 <= weekday <= 7:
+                    weekdays.append(weekday)
+            elif entry.get("entry_type") == "date":
+                calendar_type = str(entry.get("calendar_type", "") or "").strip().lower()
+                month = int(entry.get("month", 0) or 0)
+                day = int(entry.get("day", 0) or 0)
+                if calendar_type in {"solar", "lunar"} and 1 <= month <= 12 and 1 <= day <= 31:
+                    dates.append(
+                        {
+                            "id": entry.get("id"),
+                            "calendar_type": calendar_type,
+                            "month": month,
+                            "day": day,
+                            "name": str(entry.get("name", "") or ""),
+                        }
+                    )
+        return {
+            "weekdays": sorted(set(weekdays)),
+            "dates": dates,
+        }
+
+    def is_holiday_on_date(self, date_obj) -> Optional[Dict[str, Any]]:
+        """判斷指定日期是否命中任一假日規則，命中時回傳規則。"""
+        try:
+            rules = self.get_all_holiday_entries()
+            weekday = date_obj.isoweekday()
+            for rule in rules:
+                if rule.get("entry_type") == "weekday" and int(rule.get("weekday", 0) or 0) == weekday:
+                    return rule
+
+            for rule in rules:
+                if rule.get("entry_type") != "date":
+                    continue
+                month = int(rule.get("month", 0) or 0)
+                day = int(rule.get("day", 0) or 0)
+                calendar_type = str(rule.get("calendar_type", "") or "").strip().lower()
+                if calendar_type == "solar" and date_obj.month == month and date_obj.day == day:
+                    return rule
+                if calendar_type == "lunar":
+                    lunar_info = to_lunar(date_obj)
+                    if lunar_info and lunar_info.lunar_month == month and lunar_info.lunar_day == day:
+                        return rule
+            return None
+        except Exception:
+            return None
 
     # ==================== General Settings ====================
 

@@ -1,77 +1,78 @@
-# CalendarUA RRULE 說明
+# CalendarUA RRULE 指南
 
-CalendarUA 使用 RFC 5545 RRULE 作為週期規則核心，並額外支援自訂參數 `DURATION`。
+CalendarUA 以 RFC 5545 RRULE 為基礎，並擴充少量自訂欄位，供排程與 UI 使用。
 
-## 格式
+## 1. 基本格式
 
-實務上 `rrule_str` 以分號字串儲存，例如：
+`rrule_str` 以 `;` 分隔，例如：
 
 ```text
-FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0;DTSTART=20260301T080000;DURATION=PT30M
+FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0;DTSTART:20260301T080000;DURATION=PT30M
 ```
 
-## 主要參數
+> 注意：本專案同時相容 `DTSTART:` 與部分 `X-*` 自訂參數。
 
-### 必填
+## 2. 常用標準參數
 
-- `FREQ`：重複頻率，支援 `DAILY` / `WEEKLY` / `MONTHLY` / `YEARLY`。
+- `FREQ`：`DAILY | WEEKLY | MONTHLY | YEARLY`
+- `INTERVAL`：間隔，預設 `1`
+- `BYDAY`：星期條件（如 `MO,TU,WE`）
+- `BYMONTHDAY`：每月第幾天（`1~31`）
+- `BYMONTH`：月份（`1~12`）
+- `BYSETPOS`：位置（例如 `1`, `-1`）
+- `BYHOUR` / `BYMINUTE` / `BYSECOND`
+- `COUNT`：總次數上限
+- `UNTIL`：截止時間（`YYYYMMDDTHHMMSS`）
+- `DTSTART`：起始時間（`YYYYMMDDTHHMMSS`）
 
-### 常用可選
+## 3. CalendarUA 自訂參數
 
-- `INTERVAL`：間隔，預設 `1`。
-- `BYDAY`：星期條件（`MO,TU,...`）。
-- `BYMONTHDAY`：每月第幾日（`1-31`）。
-- `BYMONTH`：月份（`1-12`）。
-- `BYSETPOS`：例如第一個、最後一個（可負數）。
-- `BYHOUR`：小時（`0-23`）。
-- `BYMINUTE`：分鐘（`0-59`）。
-- `COUNT`：最多觸發次數。
-- `UNTIL`：結束時間（格式 `YYYYMMDDTHHMMSS`）。
-- `DTSTART`：規則起始時間（格式 `YYYYMMDDTHHMMSS`）。
+- `DURATION=PT...`：事件持續時間（例如 `PT0M`, `PT15M`, `PT1H`）
+- `X-LUNAR=1`：標記規則為農曆語意（由 UI 生成/解析）
+- `X-RANGE-START=...`：範圍起始補充資訊（resolver 會讀取）
 
-### CalendarUA 自訂
+## 4. 解析行為（本專案）
 
-- `DURATION`：持續時間（ISO-8601 duration，例：`PT0M`、`PT30M`、`PT1H`）。
+- occurrence 先由 RRULE 觸發，再套用：
+  1. `schedule_exceptions`（cancel/override）
+  2. `holidays` 假日規則（若排程未勾 `ignore_holiday`）
+- `DURATION` 決定事件區間長度
+- 已停用排程會標記為關閉狀態顯示
 
-## 行為重點
-
-- `DURATION=PT0M`：視為瞬時事件。
-- `DURATION>PT0M`：事件有時間區間，會在日/週/月視圖以區間呈現。
-- 假日覆寫與例外規則會在 resolver 階段套用到 occurrence。
-
-## 範例
+## 5. 範例
 
 ### 每天 08:00，持續 30 分鐘
 
 ```text
-FREQ=DAILY;BYHOUR=8;BYMINUTE=0;DTSTART=20260301T080000;DURATION=PT30M
+FREQ=DAILY;BYHOUR=8;BYMINUTE=0;DTSTART:20260301T080000;DURATION=PT30M
 ```
 
-### 每週一到週五 09:30
+### 每週一到週五 09:30，15 分鐘
 
 ```text
-FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=30;DTSTART=20260301T093000;DURATION=PT15M
+FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=30;DTSTART:20260301T093000;DURATION=PT15M
 ```
 
-### 每月最後一個星期五 17:00
+### 每月最後一個星期五 17:00，1 小時
 
 ```text
-FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1;BYHOUR=17;BYMINUTE=0;DTSTART=20260301T170000;DURATION=PT1H
+FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1;BYHOUR=17;BYMINUTE=0;DTSTART:20260301T170000;DURATION=PT1H
 ```
 
 ### 有截止日期
 
 ```text
-FREQ=DAILY;BYHOUR=6;BYMINUTE=0;UNTIL=20261231T235959;DTSTART=20260301T060000;DURATION=PT10M
+FREQ=DAILY;BYHOUR=6;BYMINUTE=0;UNTIL=20261231T235959;DTSTART:20260301T060000;DURATION=PT10M
 ```
 
-## 常見錯誤
+## 6. 常見錯誤
 
-- 缺少 `FREQ`。
-- `UNTIL` 早於 `DTSTART`。
-- `BYDAY` / `BYMONTHDAY` / `BYSETPOS` 組合不合理，導致無 occurrence。
+- 少 `FREQ`
+- `UNTIL` 早於 `DTSTART`
+- `BYDAY/BYMONTHDAY/BYSETPOS` 組合錯誤導致無 occurrence
+- 時間欄位格式錯誤（非數字或超出範圍）
 
-## 參考
+## 7. 參考
 
 - RFC 5545: https://datatracker.ietf.org/doc/html/rfc5545
 - python-dateutil rrule: https://dateutil.readthedocs.io/en/stable/rrule.html

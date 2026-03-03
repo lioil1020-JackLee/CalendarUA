@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import re
 
 from core.rrule_parser import RRuleParser
+from core.lunar_calendar import to_lunar
 
 
 @dataclass
@@ -75,16 +76,53 @@ def _pick_color(target_value: str) -> tuple[str, str]:
     return "#ff1a1a", "#ffffff"
 
 
-def _build_holiday_map(holiday_entries: Optional[List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-    holiday_map: Dict[str, List[Dict[str, Any]]] = {}
+def _build_holiday_map(holiday_entries: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    holiday_map: Dict[str, Any] = {
+        "by_date": {},
+        "weekday": {},
+        "solar": {},
+        "lunar": {},
+    }
     if not holiday_entries:
         return holiday_map
 
     for entry in holiday_entries:
-        date_key = str(entry.get("holiday_date", "")).strip()
-        if not date_key:
+        entry_type = str(entry.get("entry_type", "")).strip().lower()
+
+        # 新版：星期規則
+        if entry_type == "weekday":
+            try:
+                weekday = int(entry.get("weekday", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= weekday <= 7:
+                holiday_map["weekday"].setdefault(weekday, []).append(entry)
             continue
-        holiday_map.setdefault(date_key, []).append(entry)
+
+        # 新版：國/農曆日期規則
+        if entry_type == "date":
+            calendar_type = str(entry.get("calendar_type", "")).strip().lower()
+            try:
+                month = int(entry.get("month", 0) or 0)
+                day = int(entry.get("day", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                continue
+
+            if calendar_type == "solar":
+                holiday_map["solar"].setdefault((month, day), []).append(entry)
+                continue
+
+            if calendar_type == "lunar":
+                holiday_map["lunar"].setdefault((month, day), []).append(entry)
+                continue
+
+        # 舊版相容：固定西曆日期 holiday_date
+        date_key = str(entry.get("holiday_date", "")).strip()
+        if date_key:
+            holiday_map["by_date"].setdefault(date_key, []).append(entry)
 
     return holiday_map
 
@@ -140,6 +178,41 @@ def _pick_holiday_entry(
     return matched[0]
 
 
+def _pick_matched_holiday_entry(
+    holiday_map: Dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> Optional[Dict[str, Any]]:
+    date_obj = start_dt.date()
+    date_key = date_obj.isoformat()
+
+    candidates: List[Dict[str, Any]] = []
+
+    # 1) 舊版明確日期
+    candidates.extend(holiday_map.get("by_date", {}).get(date_key, []))
+
+    # 2) 週幾規則
+    weekday = date_obj.isoweekday()  # 1=Mon...7=Sun
+    candidates.extend(holiday_map.get("weekday", {}).get(weekday, []))
+
+    # 3) 國曆月/日規則
+    candidates.extend(holiday_map.get("solar", {}).get((date_obj.month, date_obj.day), []))
+
+    # 4) 農曆月/日規則
+    lunar_rules = holiday_map.get("lunar", {})
+    if lunar_rules:
+        lunar_info = to_lunar(date_obj)
+        if lunar_info:
+            candidates.extend(
+                lunar_rules.get((int(lunar_info.lunar_month), int(lunar_info.lunar_day)), [])
+            )
+
+    if not candidates:
+        return None
+
+    return _pick_holiday_entry(candidates, start_dt, end_dt)
+
+
 def resolve_occurrences_for_range(
     schedules: List[Dict[str, Any]],
     range_start: datetime,
@@ -172,6 +245,7 @@ def resolve_occurrences_for_range(
 
     for schedule in schedules:
         is_disabled = not bool(schedule.get("is_enabled"))
+        ignore_holiday = bool(schedule.get("ignore_holiday", 0))
 
         rrule_str = str(schedule.get("rrule_str", "")).strip()
         if not rrule_str:
@@ -237,8 +311,8 @@ def resolve_occurrences_for_range(
             resolved_end = end
 
             holiday_entry = None
-            if holiday_map:
-                holiday_entry = _pick_holiday_entry(holiday_map.get(occurrence_date, []), start, end)
+            if holiday_map and not ignore_holiday:
+                holiday_entry = _pick_matched_holiday_entry(holiday_map, start, end)
 
             if holiday_entry:
                 is_holiday = True

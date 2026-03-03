@@ -39,6 +39,8 @@
   寫值重試延遲秒數。
 - `is_enabled INTEGER DEFAULT 1`  
   是否啟用（1=啟用, 0=停用）。
+- `ignore_holiday INTEGER DEFAULT 0`  
+  是否忽略假日規則（1=忽略, 0=套用假日規則）。
 - `category_id INTEGER DEFAULT 1`  
   類別顏色 ID（對應 `schedule_categories.id`）。
 - `priority INTEGER DEFAULT 1`  
@@ -100,52 +102,35 @@
 
 ---
 
-### 3. `holiday_calendars` 表 - 假日日曆清單
+### 3. `holidays` 表 - 假日規則（單表整合）
 
-**用途**：管理多個假日日曆（例如「台灣國定假日」、「公司休假」）。
-
-**主要欄位**
-
-- `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `name TEXT UNIQUE NOT NULL`  
-  日曆名稱。
-- `description TEXT`  
-  說明。
-- `is_default INTEGER DEFAULT 0`  
-  是否為預設假日日曆。
-- `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
-- `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
-
----
-
-### 4. `holiday_entries` 表 - 假日條目
-
-**用途**：實際的假日資料，一列對應一個日期（可全天或時段）。
+**用途**：整合「每週假日（週一~週日）」與「國曆/農曆固定月日」設定。  
+目前假日設定頁僅使用此表，不再依賴 `holiday_calendars` / `holiday_entries`。
 
 **主要欄位**
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `calendar_id INTEGER NOT NULL`  
-  對應 `holiday_calendars.id`，`ON DELETE CASCADE`。
-- `holiday_date TEXT NOT NULL`  
-  假日日期（`YYYY-MM-DD`）。
-- `name TEXT NOT NULL`  
-  假日名稱（例如：春節、國慶日）。
-- `is_full_day INTEGER DEFAULT 1`  
-  是否全天假日（1=全天, 0=僅時段）。
-- `start_time TEXT` / `end_time TEXT`  
-  時段假日的開始/結束時間（`HH:MM[:SS]`）。
-- `override_category_id INTEGER`  
-  若有設定，該日的排程會以此 Category 顏色顯示。
+- `entry_type TEXT NOT NULL`  
+  規則型態：`weekday` 或 `date`。
+- `calendar_type TEXT`  
+  只有 `entry_type='date'` 會使用，值為 `solar`（國曆）或 `lunar`（農曆）。
+- `month INTEGER` / `day INTEGER`  
+  日期型規則用的月/日。
+- `weekday INTEGER`  
+  每週規則用（1=週一 ... 7=週日）。
+- `name TEXT DEFAULT ''`  
+  顯示名稱（可空）。
 - `override_target_value TEXT`  
-  若有設定，可覆寫該日排程的目標值。
+  可選：若命中假日可覆寫排程目標值。
+- `is_enabled INTEGER DEFAULT 1`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
 **索引**
 
-- `idx_holiday_entries_calendar_date (calendar_id, holiday_date)`
-- `idx_holiday_entries_category (override_category_id)`
+- `idx_holidays_unique_weekday`：`entry_type='weekday'` 下 `weekday` 唯一
+- `idx_holidays_unique_date`：`entry_type='date'` 下 `(calendar_type, month, day)` 唯一
+- `idx_holidays_enabled`：`(is_enabled)`
 
 ---
 
