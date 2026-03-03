@@ -171,8 +171,7 @@ def resolve_occurrences_for_range(
     holiday_map = _build_holiday_map(holiday_entries_list)
 
     for schedule in schedules:
-        if not schedule.get("is_enabled"):
-            continue
+        is_disabled = not bool(schedule.get("is_enabled"))
 
         rrule_str = str(schedule.get("rrule_str", "")).strip()
         if not rrule_str:
@@ -280,6 +279,12 @@ def resolve_occurrences_for_range(
                 if not resolved_title.endswith("(過期)"):
                     resolved_title = f"{resolved_title} (過期)"
                 source = "expired"
+                bg_color, fg_color = "#000000", "#ffffff"
+
+            if is_disabled:
+                if not resolved_title.endswith("(關閉)"):
+                    resolved_title = f"{resolved_title} (關閉)"
+                source = "disabled"
                 bg_color, fg_color = "#000000", "#ffffff"
 
             if resolved_end <= resolved_start:

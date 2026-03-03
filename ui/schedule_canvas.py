@@ -273,7 +273,7 @@ class ScheduleTimeGridWidget(QWidget):
             self.context_action_requested.emit("refresh", payload)
 
     def _on_cell_double_clicked(self, row: int, col: int):
-        """滑鼠左鍵雙擊：若有行程則編輯，否則新增。"""
+        """滑鼠左鍵雙擊：僅在該格有行程時才進入編輯。"""
         occurrences = self._cell_occurrence_map.get((row, col), [])
         occurrence = occurrences[0] if occurrences else None
         schedule_id = occurrence.schedule_id if occurrence else None
@@ -286,15 +286,15 @@ class ScheduleTimeGridWidget(QWidget):
             "week_mode": self.week_mode,
         }
 
-        if schedule_id is not None:
-            target = self._pick_occurrence(row, col, "編輯")
-            if target is None:
-                return
-            payload["schedule_id"] = target.schedule_id
-            payload["hour"] = target.start.hour
-            self.context_action_requested.emit("edit", payload)
-        else:
-            self.context_action_requested.emit("new", payload)
+        if schedule_id is None:
+            return
+
+        target = self._pick_occurrence(row, col, "編輯")
+        if target is None:
+            return
+        payload["schedule_id"] = target.schedule_id
+        payload["hour"] = target.start.hour
+        self.context_action_requested.emit("edit", payload)
 
     def _render(self):
         self._ensure_items()

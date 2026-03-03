@@ -194,20 +194,18 @@ class PopupDateEdit(QDateEdit):
 
         if self.lineEdit() is not None:
             self.lineEdit().setCursor(Qt.PointingHandCursor)
-            self.lineEdit().installEventFilter(self)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self.isEnabled():
-            self._show_calendar_popup()
-            event.accept()
-            return
+        # 禁止點擊開啟彈出月曆：保留預設行為（不彈出）
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        # 忽略雙擊，避免觸發開啟編輯或其他行為
+        event.accept()
+        return
+
     def eventFilter(self, obj, event):
-        if obj == self.lineEdit() and event.type() == QEvent.MouseButtonPress and self.isEnabled():
-            self._show_calendar_popup()
-            event.accept()
-            return True
+        # 不攔截 lineEdit 的點擊事件，避免開啟月曆彈窗
         return super().eventFilter(obj, event)
 
     def _show_calendar_popup(self):
@@ -1778,26 +1776,23 @@ class RecurrenceDialog(QDialog):
                 # 處理刪除和退格鍵，使用更直接的方法
                 if event.key() == Qt.Key_Delete:
                     # Delete鍵：刪除游標後的字符
-                    if cursor_pos < len(line_edit.text()):
-                        # 使用QLineEdit的del_方法
-                        line_edit.del_()
-                        event.accept()
-                        return True
-                    else:
-                        event.accept()
-                        return True
+                    text = line_edit.text()
+                    if cursor_pos < len(text):
+                        new_text = text[:cursor_pos] + text[cursor_pos + 1:]
+                        line_edit.setText(new_text)
+                        line_edit.setCursorPosition(cursor_pos)
+                    event.accept()
+                    return True
 
                 elif event.key() == Qt.Key_Backspace:
                     # Backspace鍵：刪除游標前的字符
+                    text = line_edit.text()
                     if cursor_pos > 0:
-                        # 移動游標到前一個位置然後刪除
+                        new_text = text[: cursor_pos - 1] + text[cursor_pos:]
+                        line_edit.setText(new_text)
                         line_edit.setCursorPosition(cursor_pos - 1)
-                        line_edit.del_()
-                        event.accept()
-                        return True
-                    else:
-                        event.accept()
-                        return True
+                    event.accept()
+                    return True
 
                 # 對於其他鍵盤事件，讓預設處理繼續
                 elif event.key() in [Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End]:

@@ -85,8 +85,6 @@ class MonthViewWidget(QWidget):
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
-        # 支援滑鼠左鍵雙擊：直接開啟編輯 / 新增視窗
-        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.verticalHeader().setVisible(False)
@@ -233,36 +231,6 @@ class MonthViewWidget(QWidget):
         self.selected_date = qdate
         self.date_selected.emit(qdate)
         self._render()
-
-    def _on_cell_double_clicked(self, row: int, col: int):
-        """滑鼠左鍵雙擊：有任務則選擇後編輯，否則新增。"""
-        qdate = self._cell_dates.get((row, col))
-        if qdate is None:
-            return
-
-        events = self._grouped_events.get(qdate, [])
-        if events:
-            target = self._pick_event(qdate, events, "編輯")
-            if target is None:
-                return
-            payload = {
-                "schedule_id": target.schedule_id,
-                "date": qdate.toString("yyyy-MM-dd"),
-                "hour": target.start.hour,
-                "week_mode": False,
-                "month_mode": True,
-            }
-            self.context_action_requested.emit("edit", payload)
-            return
-
-        payload = {
-            "schedule_id": None,
-            "date": qdate.toString("yyyy-MM-dd"),
-            "hour": 8,
-            "week_mode": False,
-            "month_mode": True,
-        }
-        self.context_action_requested.emit("new", payload)
 
     def _on_chip_double_clicked(self, qdate: QDate, occurrence: ResolvedOccurrence):
         """雙擊任務 chip 時編輯該任務。"""
