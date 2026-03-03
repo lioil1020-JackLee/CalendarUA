@@ -182,22 +182,6 @@ class SQLiteManager:
                     """
                 )
 
-                # 創建 schedule_categories 表
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS schedule_categories (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT UNIQUE NOT NULL,
-                        bg_color TEXT NOT NULL,
-                        fg_color TEXT NOT NULL,
-                        sort_order INTEGER DEFAULT 0,
-                        is_system INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-
                 # 檢查並添加缺少的欄位
                 cursor.execute("PRAGMA table_info(schedules)")
                 columns = [column[1] for column in cursor.fetchall()]
@@ -226,9 +210,6 @@ class SQLiteManager:
                 
                 # 執行遷移以添加缺失的欄位
                 self._migrate_db()
-                
-                # 初始化預設 categories
-                self._init_default_categories()
                 
                 return True
 
@@ -360,78 +341,43 @@ class SQLiteManager:
                     "CREATE INDEX IF NOT EXISTS idx_holiday_entries_calendar_date ON holiday_entries(calendar_id, holiday_date)"
                 )
                 
-                # ===== Category 相關欄位遷移 (Phase 6) =====
-                
-                # 為 schedules 表添加 category 相關欄位
                 cursor.execute("PRAGMA table_info(schedules)")
                 schedules_columns = [column[1] for column in cursor.fetchall()]
-                
-                if "category_id" not in schedules_columns:
-                    cursor.execute(
-                        "ALTER TABLE schedules ADD COLUMN category_id INTEGER DEFAULT 1"
-                    )
-                    logger.info("已添加 schedules.category_id 欄位")
-                
+
                 if "priority" not in schedules_columns:
                     cursor.execute(
                         "ALTER TABLE schedules ADD COLUMN priority INTEGER DEFAULT 1"
                     )
                     logger.info("已添加 schedules.priority 欄位")
-                
+
                 if "location" not in schedules_columns:
                     cursor.execute(
                         "ALTER TABLE schedules ADD COLUMN location TEXT DEFAULT ''"
                     )
                     logger.info("已添加 schedules.location 欄位")
-                
+
                 if "description" not in schedules_columns:
                     cursor.execute(
                         "ALTER TABLE schedules ADD COLUMN description TEXT DEFAULT ''"
                     )
                     logger.info("已添加 schedules.description 欄位")
-                
-                # 為 schedule_exceptions 表添加 category 相關欄位
+
                 cursor.execute("PRAGMA table_info(schedule_exceptions)")
                 exceptions_columns = [column[1] for column in cursor.fetchall()]
-                
-                if "override_category_id" not in exceptions_columns:
-                    cursor.execute(
-                        "ALTER TABLE schedule_exceptions ADD COLUMN override_category_id INTEGER"
-                    )
-                    logger.info("已添加 schedule_exceptions.override_category_id 欄位")
-                
                 if "note" not in exceptions_columns:
                     cursor.execute(
                         "ALTER TABLE schedule_exceptions ADD COLUMN note TEXT DEFAULT ''"
                     )
                     logger.info("已添加 schedule_exceptions.note 欄位")
-                
-                # 為 holiday_entries 表添加 override 相關欄位
+
                 cursor.execute("PRAGMA table_info(holiday_entries)")
                 holiday_entries_columns = [column[1] for column in cursor.fetchall()]
-                
-                if "override_category_id" not in holiday_entries_columns:
-                    cursor.execute(
-                        "ALTER TABLE holiday_entries ADD COLUMN override_category_id INTEGER"
-                    )
-                    logger.info("已添加 holiday_entries.override_category_id 欄位")
-                
                 if "override_target_value" not in holiday_entries_columns:
                     cursor.execute(
                         "ALTER TABLE holiday_entries ADD COLUMN override_target_value TEXT"
                     )
                     logger.info("已添加 holiday_entries.override_target_value 欄位")
-                
-                # 建立索引
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_schedules_category ON schedules(category_id)"
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_exceptions_category ON schedule_exceptions(override_category_id)"
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_holiday_entries_category ON holiday_entries(override_category_id)"
-                )
+
                 # 依照下一次執行時間優化查詢效能（排程掃描常用）
                 cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_schedules_next_time ON schedules(next_execution_time)"
@@ -441,261 +387,6 @@ class SQLiteManager:
                 
         except sqlite3.Error as e:
             logger.error(f"資料庫遷移失敗: {e}")
-
-    def _init_default_categories(self) -> None:
-        """
-        初始化預設 categories
-        如果 schedule_categories 表為空，插入系統預設類別
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                
-                # 檢查是否已有 categories
-                cursor.execute("SELECT COUNT(*) as count FROM schedule_categories")
-                count = cursor.fetchone()['count']
-                
-                if count == 0:
-                    # 插入系統預設類別
-                    default_categories = [
-                        ("Red (關閉)", "#FF0000", "#FFFFFF", 1, 1),
-                        ("Pink (自動)", "#FF69B4", "#FFFFFF", 2, 1),
-                        ("Light Purple (休假手動台)", "#DDA0DD", "#000000", 3, 1),
-                        ("Green", "#00FF00", "#000000", 4, 1),
-                        ("Blue", "#0000FF", "#FFFFFF", 5, 1),
-                        ("Yellow", "#FFFF00", "#000000", 6, 1),
-                        ("Orange", "#FFA500", "#000000", 7, 1),
-                        ("Gray", "#808080", "#FFFFFF", 8, 1),
-                    ]
-                    
-                    cursor.executemany(
-                        """
-                        INSERT INTO schedule_categories 
-                        (name, bg_color, fg_color, sort_order, is_system)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        default_categories
-                    )
-                    
-                    conn.commit()
-                    logger.info(f"已插入 {len(default_categories)} 個預設 categories")
-                
-        except sqlite3.Error as e:
-            logger.error(f"初始化預設 categories 失敗: {e}")
-
-    # ===== Category CRUD 方法 =====
-
-    def get_all_categories(self) -> List[Dict[str, Any]]:
-        """
-        取得所有 categories
-        
-        Returns:
-            List[Dict]: categories 列表
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT id, name, bg_color, fg_color, sort_order, is_system,
-                           created_at, updated_at
-                    FROM schedule_categories
-                    ORDER BY sort_order, name
-                    """
-                )
-                categories = [dict(row) for row in cursor.fetchall()]
-                return categories
-        except sqlite3.Error as e:
-            logger.error(f"取得 categories 失敗: {e}")
-            return []
-
-    def get_category_by_id(self, category_id: int) -> Optional[Dict[str, Any]]:
-        """
-        根據 ID 取得 category
-        
-        Args:
-            category_id: Category ID
-            
-        Returns:
-            Optional[Dict]: Category 資料或 None
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT id, name, bg_color, fg_color, sort_order, is_system,
-                           created_at, updated_at
-                    FROM schedule_categories
-                    WHERE id = ?
-                    """,
-                    (category_id,)
-                )
-                row = cursor.fetchone()
-                return dict(row) if row else None
-        except sqlite3.Error as e:
-            logger.error(f"取得 category 失敗: {e}")
-            return None
-
-    def add_category(
-        self,
-        name: str,
-        bg_color: str,
-        fg_color: str,
-        sort_order: int = 0
-    ) -> Optional[int]:
-        """
-        新增 category
-        
-        Args:
-            name: Category 名稱
-            bg_color: 背景顏色 (hex)
-            fg_color: 前景顏色 (hex)
-            sort_order: 排序順序
-            
-        Returns:
-            Optional[int]: 新增的 category ID 或 None
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO schedule_categories 
-                    (name, bg_color, fg_color, sort_order, is_system)
-                    VALUES (?, ?, ?, ?, 0)
-                    """,
-                    (name, bg_color, fg_color, sort_order)
-                )
-                conn.commit()
-                return cursor.lastrowid
-        except sqlite3.IntegrityError:
-            logger.error(f"Category 名稱已存在: {name}")
-            return None
-        except sqlite3.Error as e:
-            logger.error(f"新增 category 失敗: {e}")
-            return None
-
-    def update_category(
-        self,
-        category_id: int,
-        name: str = None,
-        bg_color: str = None,
-        fg_color: str = None,
-        sort_order: int = None
-    ) -> bool:
-        """
-        更新 category
-        
-        Args:
-            category_id: Category ID
-            name: 新名稱（可選）
-            bg_color: 新背景顏色（可選）
-            fg_color: 新前景顏色（可選）
-            sort_order: 新排序順序（可選）
-            
-        Returns:
-            bool: 是否成功
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                
-                # 先檢查是否為系統類別
-                cursor.execute(
-                    "SELECT is_system FROM schedule_categories WHERE id = ?",
-                    (category_id,)
-                )
-                row = cursor.fetchone()
-                if not row:
-                    logger.error(f"Category 不存在: {category_id}")
-                    return False
-                
-                # 建立更新語句
-                updates = []
-                params = []
-                
-                if name is not None:
-                    updates.append("name = ?")
-                    params.append(name)
-                if bg_color is not None:
-                    updates.append("bg_color = ?")
-                    params.append(bg_color)
-                if fg_color is not None:
-                    updates.append("fg_color = ?")
-                    params.append(fg_color)
-                if sort_order is not None:
-                    updates.append("sort_order = ?")
-                    params.append(sort_order)
-                
-                if not updates:
-                    return True
-                
-                updates.append("updated_at = CURRENT_TIMESTAMP")
-                params.append(category_id)
-                
-                cursor.execute(
-                    f"UPDATE schedule_categories SET {', '.join(updates)} WHERE id = ?",
-                    params
-                )
-                conn.commit()
-                return cursor.rowcount > 0
-                
-        except sqlite3.IntegrityError:
-            logger.error(f"Category 名稱已存在: {name}")
-            return False
-        except sqlite3.Error as e:
-            logger.error(f"更新 category 失敗: {e}")
-            return False
-
-    def delete_category(self, category_id: int) -> bool:
-        """
-        刪除 category（系統類別不可刪除）
-        
-        Args:
-            category_id: Category ID
-            
-        Returns:
-            bool: 是否成功
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                
-                # 檢查是否為系統類別
-                cursor.execute(
-                    "SELECT is_system FROM schedule_categories WHERE id = ?",
-                    (category_id,)
-                )
-                row = cursor.fetchone()
-                if not row:
-                    logger.error(f"Category 不存在: {category_id}")
-                    return False
-                
-                if row['is_system']:
-                    logger.error(f"無法刪除系統 category: {category_id}")
-                    return False
-                
-                # 檢查是否有排程使用此 category
-                cursor.execute(
-                    "SELECT COUNT(*) as count FROM schedules WHERE category_id = ?",
-                    (category_id,)
-                )
-                count = cursor.fetchone()['count']
-                if count > 0:
-                    logger.error(f"無法刪除 category，有 {count} 個排程正在使用: {category_id}")
-                    return False
-                
-                cursor.execute(
-                    "DELETE FROM schedule_categories WHERE id = ?",
-                    (category_id,)
-                )
-                conn.commit()
-                return cursor.rowcount > 0
-                
-        except sqlite3.Error as e:
-            logger.error(f"刪除 category 失敗: {e}")
-            return False
 
     def add_schedule(
         self,
@@ -724,7 +415,6 @@ class SQLiteManager:
             target_value: 要寫入的數值
             rrule_str: RRULE 規則字串
             data_type: 資料型別 (auto/int/float/string/bool)
-            category_id: Category ID (預設 1 = Red)
             opc_security_policy: OPC安全策略
             opc_security_mode: OPC安全模式 (None/Sign/SignAndEncrypt)
             opc_username: OPC使用者名稱
@@ -738,8 +428,8 @@ class SQLiteManager:
         """
         insert_sql = """
         INSERT INTO schedules (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                              category_id, opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         try:
@@ -748,7 +438,7 @@ class SQLiteManager:
                 cursor.execute(
                     insert_sql,
                     (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                     category_id, opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled),
+                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled),
                 )
                 conn.commit()
                 new_id = cursor.lastrowid
@@ -910,7 +600,7 @@ class SQLiteManager:
 
         Args:
             schedule_id: 要更新的排程 ID
-            **kwargs: 要更新的欄位（task_name, opc_url, node_id, target_value, rrule_str, category_id, is_enabled）
+            **kwargs: 要更新的欄位（task_name, opc_url, node_id, target_value, rrule_str, is_enabled）
 
         Returns:
             bool: 更新成功回傳 True，否則回傳 False
@@ -923,7 +613,6 @@ class SQLiteManager:
             "target_value",
             "data_type",
             "rrule_str",
-            "category_id",
             "opc_security_policy",
             "opc_security_mode",
             "opc_username",

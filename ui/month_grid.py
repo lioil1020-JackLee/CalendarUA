@@ -6,7 +6,7 @@ from typing import Dict, List
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHeaderView, QLabel, QMenu, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHeaderView, QInputDialog, QLabel, QMenu, QTableWidget, QVBoxLayout, QWidget
 
 from core.schedule_resolver import ResolvedOccurrence
 from core.lunar_calendar import to_lunar, LunarDateInfo
@@ -34,6 +34,21 @@ def _format_lunar_day(info: LunarDateInfo) -> str:
     ten = chinese_ten[(n - 1) // 10]
     digit = numerals[(n - 1) % 10]
     return f"{ten}{digit}"
+
+
+class EventChipLabel(QLabel):
+    event_double_clicked = Signal(object)
+
+    def __init__(self, occurrence: ResolvedOccurrence, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.occurrence = occurrence
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.event_double_clicked.emit(self.occurrence)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class MonthViewWidget(QWidget):
@@ -107,6 +122,21 @@ class MonthViewWidget(QWidget):
 
     def _build_cell_widget(self, qdate: QDate, events: List[ResolvedOccurrence]) -> QWidget:
         container = QWidget()
+        is_selected = qdate == self.selected_date
+        is_today = qdate == QDate.currentDate()
+
+        if is_selected and is_today:
+            container.setStyleSheet(
+                "background-color: rgba(47, 115, 217, 0.22); border: 2px solid #f4c542; border-radius: 4px;"
+            )
+        elif is_selected:
+            container.setStyleSheet(
+                "background-color: rgba(47, 115, 217, 0.18); border: 1px solid #2f73d9; border-radius: 4px;"
+            )
+        elif is_today:
+            container.setStyleSheet(
+                "border: 1px solid #f4c542; border-radius: 4px;"
+            )
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(3)
@@ -125,17 +155,19 @@ class MonthViewWidget(QWidget):
             text = f"{qdate.day()} ({lunar_text})"
 
         date_label = QLabel(text)
-        if qdate == self.selected_date:
-            date_label.setStyleSheet("font-weight: bold; color: #ffffff; background-color: #2f73d9; padding: 2px 4px; border-radius: 3px;")
-        elif qdate.month() != self.reference_date.month():
+        if qdate.month() != self.reference_date.month():
             date_label.setStyleSheet("color: #808080;")
+        elif is_selected:
+            date_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        elif is_today:
+            date_label.setStyleSheet("font-weight: bold; color: #f4c542;")
         else:
             date_label.setStyleSheet("font-weight: bold;")
 
         layout.addWidget(date_label)
 
         for occurrence in events[:3]:
-            chip = QLabel(occurrence.title)
+            chip = EventChipLabel(occurrence, occurrence.title)
             chip.setStyleSheet(
                 f"background-color: {occurrence.category_bg};"
                 f"color: {occurrence.category_fg};"
@@ -146,6 +178,9 @@ class MonthViewWidget(QWidget):
                 f"{occurrence.title}\n"
                 f"{occurrence.start.strftime('%H:%M')} - {occurrence.end.strftime('%H:%M')}\n"
                 f"{occurrence.target_value}"
+            )
+            chip.event_double_clicked.connect(
+                lambda occ, cell_date=qdate: self._on_chip_double_clicked(cell_date, occ)
             )
             layout.addWidget(chip)
 
@@ -182,26 +217,76 @@ class MonthViewWidget(QWidget):
         self._render()
 
     def _on_cell_double_clicked(self, row: int, col: int):
-        """滑鼠左鍵雙擊：若該日有行程則編輯第一筆，否則新增。"""
+        """滑鼠左鍵雙擊：有任務則選擇後編輯，否則新增。"""
         qdate = self._cell_dates.get((row, col))
         if qdate is None:
             return
 
         events = self._grouped_events.get(qdate, [])
-        first_event = events[0] if events else None
+        if events:
+            target = self._pick_event(qdate, events, "編輯")
+            if target is None:
+                return
+            payload = {
+                "schedule_id": target.schedule_id,
+                "date": qdate.toString("yyyy-MM-dd"),
+                "hour": target.start.hour,
+                "week_mode": False,
+                "month_mode": True,
+            }
+            self.context_action_requested.emit("edit", payload)
+            return
 
         payload = {
-            "schedule_id": first_event.schedule_id if first_event else None,
+            "schedule_id": None,
             "date": qdate.toString("yyyy-MM-dd"),
-            "hour": first_event.start.hour if first_event else 8,
+            "hour": 8,
             "week_mode": False,
             "month_mode": True,
         }
+        self.context_action_requested.emit("new", payload)
 
-        if first_event is not None:
-            self.context_action_requested.emit("edit", payload)
-        else:
-            self.context_action_requested.emit("new", payload)
+    def _on_chip_double_clicked(self, qdate: QDate, occurrence: ResolvedOccurrence):
+        """雙擊任務 chip 時編輯該任務。"""
+        payload = {
+            "schedule_id": occurrence.schedule_id,
+            "date": qdate.toString("yyyy-MM-dd"),
+            "hour": occurrence.start.hour,
+            "week_mode": False,
+            "month_mode": True,
+        }
+        self.context_action_requested.emit("edit", payload)
+
+    def _pick_event(self, qdate: QDate, events: List[ResolvedOccurrence], action_text: str) -> ResolvedOccurrence | None:
+        """同一天多筆任務時，讓使用者選擇目標任務。"""
+        if not events:
+            return None
+        if len(events) == 1:
+            return events[0]
+
+        option_map: Dict[str, ResolvedOccurrence] = {}
+        options: List[str] = []
+        for idx, occ in enumerate(events, start=1):
+            label = (
+                f"{occ.title} ({occ.start.strftime('%H:%M')} - {occ.end.strftime('%H:%M')}) "
+                f"[ID:{occ.schedule_id}]"
+            )
+            if label in option_map:
+                label = f"{label} #{idx}"
+            option_map[label] = occ
+            options.append(label)
+
+        selected, ok = QInputDialog.getItem(
+            self,
+            f"選擇要{action_text}的行程",
+            f"{qdate.toString('yyyy-MM-dd')} 有多筆任務，請選擇：",
+            options,
+            0,
+            False,
+        )
+        if not ok or not selected:
+            return None
+        return option_map.get(selected)
 
     def _show_context_menu(self, position):
         index = self.table.indexAt(position)
@@ -244,8 +329,18 @@ class MonthViewWidget(QWidget):
         if selected_action == new_action:
             self.context_action_requested.emit("new", payload)
         elif selected_action == edit_action:
+            target = self._pick_event(qdate, events, "編輯")
+            if target is None:
+                return
+            payload["schedule_id"] = target.schedule_id
+            payload["hour"] = target.start.hour
             self.context_action_requested.emit("edit", payload)
         elif selected_action == delete_action:
+            target = self._pick_event(qdate, events, "刪除")
+            if target is None:
+                return
+            payload["schedule_id"] = target.schedule_id
+            payload["hour"] = target.start.hour
             self.context_action_requested.emit("delete", payload)
         elif selected_action == today_action:
             self.context_action_requested.emit("today", payload)

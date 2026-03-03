@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
     QTableView,
     QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QEvent, QLocale
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QEvent, QLocale, QTime
 from PySide6.QtGui import QAction, QColor, QIcon, QTextCharFormat
 import qasync
 import re
@@ -65,7 +65,7 @@ from database.sqlite_manager import SQLiteManager
 from core.opc_handler import OPCHandler
 from core.rrule_parser import RRuleParser
 from core.schedule_resolver import resolve_occurrences_for_range
-from ui.recurrence_dialog import RecurrenceDialog, show_recurrence_dialog
+from ui.recurrence_dialog import RecurrenceDialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
 from ui.schedule_canvas import DayViewWidget, WeekViewWidget
 from ui.month_grid import MonthViewWidget
@@ -176,6 +176,14 @@ class NavCalendarWidget(QCalendarWidget):
                 fg = QColor("#808080")
             painter.setPen(fg)
             painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+
+            # 今日標記（左側小月曆永久保留一個 today 高亮）
+            if date == QDate.currentDate():
+                today_pen = QColor("#f4c542")
+                painter.setPen(today_pen)
+                painter.setBrush(Qt.NoBrush)
+                today_rect = rect.adjusted(3, 3, -3, -3)
+                painter.drawRect(today_rect)
 
         # 畫選取高亮（兩個小月曆共用同一個選取日期；但隱藏格不畫）
         if (not hide) and self._forced_selected_date and date == self._forced_selected_date:
@@ -449,14 +457,10 @@ class CalendarUA(QMainWindow):
         # 讓標題列與行事曆視圖之間緊貼，消除中間大塊空白
         right_layout.setSpacing(0)
 
-        # 視圖切換工具列（左：Category / 主視圖上一段/下一段；中：目前範圍；右：日/週/月）
+        # 視圖切換工具列（左：主視圖上一段/下一段；中：目前範圍；右：日/週/月）
         view_toolbar = QHBoxLayout()
         view_toolbar.setContentsMargins(4, 0, 4, 0)
         view_toolbar.setSpacing(4)
-
-        # Category 管理按鈕（放在右側視窗標題列左側）
-        self.btn_view_categories = QPushButton("分類")
-        self.btn_view_categories.setFixedWidth(72)
 
         # 主視圖上一段 / 下一段按鈕
         self.btn_main_prev = QToolButton()
@@ -475,12 +479,12 @@ class CalendarUA(QMainWindow):
         )
         # 讓「分類 / 上一段 / 標題 / 下一段」這組元件整體置中
         view_toolbar.addStretch()
-        view_toolbar.addWidget(self.btn_view_categories)
         view_toolbar.addWidget(self.btn_main_prev)
         view_toolbar.addWidget(self.label_current_range)
         view_toolbar.addWidget(self.btn_main_next)
         view_toolbar.addStretch()
 
+        # 右側按鈕區：日/週/月（可高亮）
         self.btn_view_day = QPushButton("日")
         self.btn_view_week = QPushButton("週")
         self.btn_view_month = QPushButton("月")
@@ -518,7 +522,6 @@ class CalendarUA(QMainWindow):
         self.combo_nav_month.currentIndexChanged.connect(self._on_nav_combo_changed)
         self.combo_nav_year.currentIndexChanged.connect(self._on_nav_combo_changed)
         self.btn_nav_today.clicked.connect(self._go_to_today_from_nav)
-        self.btn_view_categories.clicked.connect(self.manage_categories)
         self.btn_main_prev.clicked.connect(lambda: self._shift_main_range(-1))
         self.btn_main_next.clicked.connect(lambda: self._shift_main_range(1))
         self.btn_view_day.clicked.connect(lambda: self._set_view_mode("day"))
@@ -535,6 +538,7 @@ class CalendarUA(QMainWindow):
         self.day_view.context_action_requested.connect(self._on_calendar_context_action)
         self.week_view.context_action_requested.connect(self._on_calendar_context_action)
         self.month_view.context_action_requested.connect(self._on_calendar_context_action)
+        self.month_view.date_selected.connect(self._on_main_calendar_date_selected)
 
         return panel
 
@@ -563,6 +567,13 @@ class CalendarUA(QMainWindow):
         self.action_save_profile.setStatusTip("儲存 Project 設定檔")
         self.action_save_profile.triggered.connect(self.save_profile)
         file_menu.addAction(self.action_save_profile)
+
+        file_menu.addSeparator()
+
+        self.action_db_settings = QAction("&Database Settings...", self)
+        self.action_db_settings.setStatusTip("資料庫連線設定")
+        self.action_db_settings.triggered.connect(self.show_database_settings)
+        file_menu.addAction(self.action_db_settings)
         
         file_menu.addSeparator()
         
@@ -571,14 +582,6 @@ class CalendarUA(QMainWindow):
         self.action_exit.setStatusTip("離開程式")
         self.action_exit.triggered.connect(self.close)
         file_menu.addAction(self.action_exit)
-        
-        # Tools 選單
-        tools_menu = menubar.addMenu("&Tools")
-        
-        self.action_db_settings = QAction("&Database Settings...", self)
-        self.action_db_settings.setStatusTip("資料庫連線設定")
-        self.action_db_settings.triggered.connect(self.show_database_settings)
-        tools_menu.addAction(self.action_db_settings)
         
         # Help 選單
         help_menu = menubar.addMenu("&Help")
@@ -642,13 +645,6 @@ class CalendarUA(QMainWindow):
         toolbar.addWidget(self.btn_toolbar_apply)
         
         toolbar.addSeparator()
-        
-        # Categories 按鈕
-        self.btn_toolbar_categories = QPushButton("Categories")
-        self.btn_toolbar_categories.setToolTip("管理 Category 分類")
-        self.btn_toolbar_categories.setFixedWidth(100)
-        self.btn_toolbar_categories.clicked.connect(self.manage_categories)
-        toolbar.addWidget(self.btn_toolbar_categories)
         
         toolbar.addWidget(QLabel(""))  # Spacer
         toolbar.addSeparator()
@@ -714,6 +710,57 @@ class CalendarUA(QMainWindow):
             self._apply_dark_theme()
         else:
             self._apply_light_theme()
+
+        self._apply_view_toolbar_button_style(is_dark)
+
+    def _apply_view_toolbar_button_style(self, is_dark: bool):
+        """套用右上角工具按鈕樣式：日/週/月可高亮。"""
+        if not hasattr(self, "btn_view_day"):
+            return
+
+        if is_dark:
+            toggle_style = """
+                QPushButton {
+                    background-color: #2f3540;
+                    color: #d6d6d6;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-weight: 600;
+                    min-width: 48px;
+                }
+                QPushButton:hover {
+                    background-color: #3a4250;
+                }
+                QPushButton:checked {
+                    background-color: #0e639c;
+                    color: #ffffff;
+                    border: 1px solid #1177bb;
+                }
+            """
+        else:
+            toggle_style = """
+                QPushButton {
+                    background-color: #e9ecef;
+                    color: #2f2f2f;
+                    border: 1px solid #cfd3d7;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-weight: 600;
+                    min-width: 48px;
+                }
+                QPushButton:hover {
+                    background-color: #dde2e7;
+                }
+                QPushButton:checked {
+                    background-color: #0078d4;
+                    color: #ffffff;
+                    border: 1px solid #106ebe;
+                }
+            """
+        self.btn_view_day.setStyleSheet(toggle_style)
+        self.btn_view_week.setStyleSheet(toggle_style)
+        self.btn_view_month.setStyleSheet(toggle_style)
 
     def _apply_light_theme(self):
         """套用亮色主題"""
@@ -1193,6 +1240,25 @@ class CalendarUA(QMainWindow):
 
         self._refresh_main_calendar_views()
 
+    def _on_main_calendar_date_selected(self, qdate: QDate):
+        """右側主月曆點擊日期後，同步左側導覽月曆與年月下拉。"""
+        if not isinstance(qdate, QDate) or not qdate.isValid():
+            return
+
+        self.reference_date = qdate
+
+        self.combo_nav_month.blockSignals(True)
+        self.combo_nav_year.blockSignals(True)
+        self.combo_nav_month.setCurrentIndex(qdate.month() - 1)
+        year_index = self.combo_nav_year.findData(qdate.year())
+        if year_index >= 0:
+            self.combo_nav_year.setCurrentIndex(year_index)
+        self.combo_nav_month.blockSignals(False)
+        self.combo_nav_year.blockSignals(False)
+
+        self._update_nav_calendars(qdate.year(), qdate.month())
+        self._refresh_main_calendar_views()
+
     def _go_to_today_from_nav(self):
         """點擊左側『今日』按鈕時，回到今天"""
         today = QDate.currentDate()
@@ -1292,9 +1358,13 @@ class CalendarUA(QMainWindow):
         else:
             # 月視圖（Year 模式目前沿用月視圖）
             first = QDate(qd.year(), qd.month(), 1)
-            next_month = first.addMonths(1)
-            start = datetime(first.year(), first.month(), first.day())
-            end = datetime(next_month.year(), next_month.month(), next_month.day())
+            # 月格固定顯示 6x7（42 天），包含前後月的灰色日期格
+            # 因此查詢範圍需覆蓋整個可見月格，而非僅當月。
+            days_to_sunday = first.dayOfWeek() % 7
+            grid_start = first.addDays(-days_to_sunday)
+            grid_end = grid_start.addDays(42)
+            start = datetime(grid_start.year(), grid_start.month(), grid_start.day())
+            end = datetime(grid_end.year(), grid_end.month(), grid_end.day())
             self.label_current_range.setText(qd.toString("yyyy年 M月"))
 
         if start is None or end is None:
@@ -1815,18 +1885,6 @@ class CalendarUA(QMainWindow):
                 else:
                     QMessageBox.critical(self, "錯誤", "刪除排程失敗")
 
-    def manage_categories(self):
-        """開啟 Category 管理對話框"""
-        from ui.category_manager_dialog import CategoryManagerDialog
-        
-        dialog = CategoryManagerDialog(self, self.db_manager)
-        dialog.category_changed.connect(self.on_category_changed)
-        dialog.exec()
-
-    def on_category_changed(self):
-        """當 Category 變更時重新載入視圖"""
-        self.load_schedules()  # 重新載入排程以更新 category 顏色
-
     def edit_selected_schedule(self):
         """編輯目前選取的排程"""
         target_id = self.selected_schedule_id
@@ -1915,31 +1973,6 @@ class CalendarUA(QMainWindow):
                 self.general_panel.load_from_dict(profile_data['general_settings'])
 
             if self.db_manager:
-                # 載入 Categories (僅使用者自訂)
-                categories = profile_data.get('categories', [])
-                if categories:
-                    existing_categories = {c['name']: c for c in self.db_manager.get_all_categories()}
-                    for cat in categories:
-                        name = cat.get('name', '').strip()
-                        if not name:
-                            continue
-                        bg_color = cat.get('bg_color', '#FFFFFF')
-                        fg_color = cat.get('fg_color', '#000000')
-                        sort_order = int(cat.get('sort_order', 0) or 0)
-                        existing = existing_categories.get(name)
-                        if existing:
-                            if existing.get('is_system'):
-                                continue
-                            self.db_manager.update_category(
-                                existing['id'],
-                                name=name,
-                                bg_color=bg_color,
-                                fg_color=fg_color,
-                                sort_order=sort_order,
-                            )
-                        else:
-                            self.db_manager.add_category(name, bg_color, fg_color, sort_order)
-
                 # 載入 Schedules
                 schedules = profile_data.get('schedules', [])
                 if schedules:
@@ -1970,7 +2003,7 @@ class CalendarUA(QMainWindow):
                             "target_value": str(sch.get('target_value', '')),
                             "data_type": str(sch.get('data_type', 'auto')),
                             "rrule_str": rrule_str,
-                            "category_id": int(sch.get('category_id', 1) or 1),
+                            "category_id": 1,
                             "opc_security_policy": str(sch.get('opc_security_policy', 'None')),
                             "opc_security_mode": str(sch.get('opc_security_mode', 'None')),
                             "opc_username": str(sch.get('opc_username', '')),
@@ -2016,20 +2049,7 @@ class CalendarUA(QMainWindow):
             if hasattr(self, 'general_panel'):
                 profile_data['general_settings'] = self.general_panel.get_current_settings()
 
-            # 儲存 Categories (僅使用者自訂)
             if self.db_manager:
-                categories = [
-                    {
-                        "name": c.get("name"),
-                        "bg_color": c.get("bg_color"),
-                        "fg_color": c.get("fg_color"),
-                        "sort_order": c.get("sort_order", 0),
-                    }
-                    for c in self.db_manager.get_all_categories()
-                    if not c.get("is_system")
-                ]
-                profile_data['categories'] = categories
-
                 schedules = []
                 for s in self.db_manager.get_all_schedules():
                     schedules.append(
@@ -2040,7 +2060,7 @@ class CalendarUA(QMainWindow):
                             "target_value": s.get("target_value"),
                             "data_type": s.get("data_type", "auto"),
                             "rrule_str": s.get("rrule_str"),
-                            "category_id": s.get("category_id", 1),
+                            "category_id": 1,
                             "opc_security_policy": s.get("opc_security_policy", "None"),
                             "opc_security_mode": s.get("opc_security_mode", "None"),
                             "opc_username": s.get("opc_username", ""),
@@ -2063,21 +2083,23 @@ class CalendarUA(QMainWindow):
 
     def show_database_settings(self):
         """顯示資料庫設定對話框"""
-        dialog = DatabaseSettingsDialog(self)
-        if dialog.exec() == QDialog.Accepted:
-            # 重新連線資料庫
+        if not self.db_manager:
             self.init_database()
+
+        dialog = DatabaseSettingsDialog(self, self.db_manager)
+        dialog.database_changed.connect(self.on_database_path_changed)
+        dialog.exec()
 
     def new_project(self):
         """
         建立新的 Project：
         - 清除目前資料庫中所有排程（schedules），相關例外會因外鍵自動刪除
-        - 保留 Categories / 假日日曆 等設定，方便重複使用
+        - 保留假日日曆等設定，方便重複使用
         """
         reply = QMessageBox.question(
             self,
             "New Project",
-            "建立新的 Project 將會清除目前所有排程資料（但保留 Category 與假日設定）。\n此操作無法復原，確定要繼續嗎？",
+            "建立新的 Project 將會清除目前所有排程資料（但保留假日設定）。\n此操作無法復原，確定要繼續嗎？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -2379,6 +2401,7 @@ class CalendarUA(QMainWindow):
         """處理資料庫路徑變更"""
         # 重新初始化資料庫管理器
         self.db_manager = SQLiteManager(new_path)
+        self.db_manager.init_db()
 
         # 重新載入排程資料
         self.load_schedules()
@@ -3651,23 +3674,11 @@ class ScheduleEditDialog(QDialog):
         type_layout.addStretch()
         basic_layout.addLayout(type_layout, 4, 1)
 
-        # Category 選單
-        basic_layout.addWidget(QLabel("Category:"), 5, 0)
-        category_layout = QHBoxLayout()
-        self.category_combo = QComboBox()
-        self.category_combo.setMinimumWidth(200)
-        category_layout.addWidget(self.category_combo)
-        category_layout.addStretch()
-        basic_layout.addLayout(category_layout, 5, 1)
-        
-        # 載入 categories
-        self._load_categories()
-
-        basic_layout.addWidget(QLabel("狀態:"), 6, 0)
+        basic_layout.addWidget(QLabel("狀態:"), 5, 0)
         self.enabled_checkbox = QCheckBox("啟用排程")
         self.enabled_checkbox.setChecked(True)  # 預設啟用
         self.enabled_checkbox.setToolTip("控制此排程是否會被執行")
-        basic_layout.addWidget(self.enabled_checkbox, 6, 1)
+        basic_layout.addWidget(self.enabled_checkbox, 5, 1)
 
         layout.addWidget(basic_group)
 
@@ -3675,14 +3686,15 @@ class ScheduleEditDialog(QDialog):
         recurrence_group = QGroupBox("週期設定")
         recurrence_layout = QVBoxLayout(recurrence_group)
 
-        self.rrule_display = QLineEdit()
-        self.rrule_display.setReadOnly(True)
-        self.rrule_display.setPlaceholderText("點擊下方按鈕設定週期規則")
-        recurrence_layout.addWidget(self.rrule_display)
-
-        self.btn_edit_recurrence = QPushButton("設定週期規則...")
-        self.btn_edit_recurrence.clicked.connect(self.edit_recurrence)
-        recurrence_layout.addWidget(self.btn_edit_recurrence)
+        initial_time = QTime(self.default_hour, 0, 0) if self.default_hour is not None else None
+        self.recurrence_editor = RecurrenceDialog(
+            self,
+            current_rrule=self.schedule.get("rrule_str", "") if self.schedule else "",
+            initial_date=self.default_date,
+            initial_time=initial_time,
+            embedded=True,
+        )
+        recurrence_layout.addWidget(self.recurrence_editor)
 
         layout.addWidget(recurrence_group)
 
@@ -3878,29 +3890,6 @@ class ScheduleEditDialog(QDialog):
             }
         """)
 
-    def _load_categories(self):
-        """載入 Category 清單到下拉選單"""
-        self.category_combo.clear()
-        
-        if not self.db_manager:
-            # 如果沒有資料庫管理器，只加入預設項目
-            self.category_combo.addItem("Red (關閉)", 1)
-            return
-        
-        try:
-            categories = self.db_manager.get_all_categories()
-            for cat in categories:
-                # 顯示名稱加上顏色預覽 (用色塊符號)
-                display_name = f"{cat['name']}"
-                self.category_combo.addItem(display_name, cat['id'])
-            
-            # 預設選擇第一個 (Red)
-            self.category_combo.setCurrentIndex(0)
-        except Exception as e:
-            print(f"載入 Categories 失敗: {e}")
-            # 失敗時加入預設項目
-            self.category_combo.addItem("Red (關閉)", 1)
-
     def load_data(self):
         """載入現有資料"""
         self.task_name_edit.setText(self.schedule.get("task_name", ""))
@@ -3916,39 +3905,10 @@ class ScheduleEditDialog(QDialog):
         display_data_type = "未偵測" if data_type == "auto" else data_type
         self.data_type_label.setText(display_data_type)
         
-        # 載入 Category
-        category_id = self.schedule.get("category_id", 1)
-        for i in range(self.category_combo.count()):
-            if self.category_combo.itemData(i) == category_id:
-                self.category_combo.setCurrentIndex(i)
-                break
-        
-        # 儲存原始 RRULE 字串，並顯示格式化的描述
+        # 儲存原始 RRULE 字串
         self.original_rrule = self.schedule.get("rrule_str", "")
-        # 暫時直接顯示原始 RRULE，稍後可以改進為格式化顯示
-        self.rrule_display.setText(self.original_rrule if self.original_rrule else "未設定")
         
         self.enabled_checkbox.setChecked(bool(self.schedule.get("is_enabled", 1)))
-
-    def edit_recurrence(self):
-        """編輯週期規則"""
-        current_rrule = self.original_rrule
-        from PySide6.QtCore import QTime
-
-        initial_time = None
-        if self.default_hour is not None:
-            initial_time = QTime(self.default_hour, 0, 0)
-
-        rrule = show_recurrence_dialog(
-            self,
-            current_rrule,
-            initial_date=self.default_date,
-            initial_time=initial_time,
-        )
-        if rrule:
-            self.original_rrule = rrule
-            # 暫時直接顯示原始 RRULE，稍後可以改進為格式化顯示
-            self.rrule_display.setText(rrule if rrule else "未設定")
 
     def get_data(self) -> Dict[str, Any]:
         """取得編輯的資料"""
@@ -3957,11 +3917,6 @@ class ScheduleEditDialog(QDialog):
         if opc_url and not opc_url.startswith("opc.tcp://"):
             opc_url = f"opc.tcp://{opc_url}"
         
-        # 取得選擇的 category_id
-        category_id = self.category_combo.currentData()
-        if category_id is None:
-            category_id = 1  # 預設 Red
-
         return {
             "task_name": self.task_name_edit.text(),
             "opc_url": opc_url,
@@ -3969,8 +3924,8 @@ class ScheduleEditDialog(QDialog):
             "target_value": self.target_value_edit.text(),
             # 處理資料型別：如果顯示"未偵測"，儲存為"auto"
             "data_type": "auto" if self.data_type_label.text() == "未偵測" else self.data_type_label.text(),
-            "rrule_str": self.original_rrule,
-            "category_id": category_id,
+            "rrule_str": self.recurrence_editor.get_rrule(),
+            "category_id": 1,
             "opc_security_policy": self.opc_security_policy,
             "opc_security_mode": self.opc_security_mode,
             "opc_username": self.opc_username,
@@ -4023,7 +3978,16 @@ class ScheduleEditDialog(QDialog):
             return
 
         # 檢查 rrule 是否為空
-        rrule_str = self.rrule_display.text().strip()
+        try:
+            rrule_str = self.recurrence_editor.get_rrule().strip()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "週期規則錯誤",
+                f"週期規則設定無效：{str(e)}",
+            )
+            return
+
         if not rrule_str:
             QMessageBox.warning(
                 self,
@@ -4031,6 +3995,8 @@ class ScheduleEditDialog(QDialog):
                 "請設定排程的週期規則，無法儲存空的週期規則。",
             )
             return
+
+        self.original_rrule = rrule_str
 
         # 如果檢查通過，接受對話框
         self.accept()

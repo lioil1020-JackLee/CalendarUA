@@ -50,7 +50,6 @@ class ScheduleSeries:
     target_value: str
     data_type: str
     rrule_str: str
-    category_id: int
     is_enabled: bool
 
     # OPC UA 連線 / 安全設定
@@ -102,7 +101,6 @@ class HolidayEntry:
     is_full_day: bool
     start_time: Optional[time]
     end_time: Optional[time]
-    override_category_id: Optional[int] = None
     override_target_value: Optional[str] = None
 
 

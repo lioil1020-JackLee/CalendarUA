@@ -5,7 +5,7 @@ from typing import List
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QHeaderView, QMenu, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHeaderView, QInputDialog, QMenu, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from core.schedule_resolver import ResolvedOccurrence
 
@@ -33,7 +33,8 @@ class ScheduleTimeGridWidget(QWidget):
         self.week_mode = week_mode
         self.reference_date = QDate.currentDate()
         self.occurrences: List[ResolvedOccurrence] = []
-        self._cell_occurrence_map: dict[tuple[int, int], ResolvedOccurrence] = {}
+        self._cell_occurrence_map: dict[tuple[int, int], List[ResolvedOccurrence]] = {}
+        self._cell_start_titles: dict[tuple[int, int], List[str]] = {}
 
         self.table = QTableWidget(24, 7 if week_mode else 1)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -98,6 +99,7 @@ class ScheduleTimeGridWidget(QWidget):
 
     def _clear_grid(self):
         self._cell_occurrence_map.clear()
+        self._cell_start_titles.clear()
         for row in range(self.table.rowCount()):
             for col in range(self.table.columnCount()):
                 item = self.table.item(row, col)
@@ -136,13 +138,75 @@ class ScheduleTimeGridWidget(QWidget):
             if item is None:
                 continue
 
-            item.setBackground(QColor(occurrence.category_bg))
-            item.setForeground(QColor(occurrence.category_fg))
+            cell_key = (row, col)
+            self._cell_occurrence_map.setdefault(cell_key, []).append(occurrence)
+
             if row == start_row:
-                item.setText(occurrence.title)
-            tooltip = f"{occurrence.title}\n{start.strftime('%H:%M')} - {end.strftime('%H:%M')}\n{occurrence.target_value}"
-            item.setToolTip(tooltip)
-            self._cell_occurrence_map[(row, col)] = occurrence
+                self._cell_start_titles.setdefault(cell_key, []).append(occurrence.title)
+
+            self._apply_cell_display(row, col)
+
+    def _apply_cell_display(self, row: int, col: int):
+        """根據同格 occurrence 數量更新文字、色彩與提示。"""
+        item = self.table.item(row, col)
+        if item is None:
+            return
+
+        cell_key = (row, col)
+        occurrences = self._cell_occurrence_map.get(cell_key, [])
+        if not occurrences:
+            return
+
+        titles = self._cell_start_titles.get(cell_key, [])
+        item.setText("\n".join(titles))
+
+        if len(occurrences) == 1:
+            occ = occurrences[0]
+            item.setBackground(QColor(occ.category_bg))
+            item.setForeground(QColor(occ.category_fg))
+        else:
+            # 同一時間格有多筆任務時，仍使用統一紅底白字
+            item.setBackground(QColor("#ff1a1a"))
+            item.setForeground(QColor("#ffffff"))
+
+        tooltip_lines = []
+        for occ in occurrences:
+            tooltip_lines.append(
+                f"{occ.title} ({occ.start.strftime('%H:%M')} - {occ.end.strftime('%H:%M')})"
+            )
+        item.setToolTip("\n".join(tooltip_lines))
+
+    def _pick_occurrence(self, row: int, col: int, action_text: str) -> ResolvedOccurrence | None:
+        """若同格有多筆任務，讓使用者選擇目標任務。"""
+        occurrences = self._cell_occurrence_map.get((row, col), [])
+        if not occurrences:
+            return None
+        if len(occurrences) == 1:
+            return occurrences[0]
+
+        options = []
+        option_map: dict[str, ResolvedOccurrence] = {}
+        for idx, occ in enumerate(occurrences, start=1):
+            label = (
+                f"{occ.title} ({occ.start.strftime('%H:%M')} - {occ.end.strftime('%H:%M')}) "
+                f"[ID:{occ.schedule_id}]"
+            )
+            if label in option_map:
+                label = f"{label} #{idx}"
+            option_map[label] = occ
+            options.append(label)
+
+        selected, ok = QInputDialog.getItem(
+            self,
+            f"選擇要{action_text}的行程",
+            "同時段有多筆任務，請選擇：",
+            options,
+            0,
+            False,
+        )
+        if not ok or not selected:
+            return None
+        return option_map.get(selected)
 
     def _date_for_column(self, col: int) -> QDate:
         if not self.week_mode:
@@ -158,7 +222,8 @@ class ScheduleTimeGridWidget(QWidget):
 
         row = index.row()
         col = index.column()
-        occurrence = self._cell_occurrence_map.get((row, col))
+        occurrences = self._cell_occurrence_map.get((row, col), [])
+        occurrence = occurrences[0] if occurrences else None
         schedule_id = occurrence.schedule_id if occurrence else None
         date_text = self._date_for_column(col).toString("yyyy-MM-dd")
 
@@ -189,8 +254,18 @@ class ScheduleTimeGridWidget(QWidget):
         if selected_action == new_action:
             self.context_action_requested.emit("new", payload)
         elif selected_action == edit_action:
+            target = self._pick_occurrence(row, col, "編輯")
+            if target is None:
+                return
+            payload["schedule_id"] = target.schedule_id
+            payload["hour"] = target.start.hour
             self.context_action_requested.emit("edit", payload)
         elif selected_action == delete_action:
+            target = self._pick_occurrence(row, col, "刪除")
+            if target is None:
+                return
+            payload["schedule_id"] = target.schedule_id
+            payload["hour"] = target.start.hour
             self.context_action_requested.emit("delete", payload)
         elif selected_action == today_action:
             self.context_action_requested.emit("today", payload)
@@ -199,7 +274,8 @@ class ScheduleTimeGridWidget(QWidget):
 
     def _on_cell_double_clicked(self, row: int, col: int):
         """滑鼠左鍵雙擊：若有行程則編輯，否則新增。"""
-        occurrence = self._cell_occurrence_map.get((row, col))
+        occurrences = self._cell_occurrence_map.get((row, col), [])
+        occurrence = occurrences[0] if occurrences else None
         schedule_id = occurrence.schedule_id if occurrence else None
         date_text = self._date_for_column(col).toString("yyyy-MM-dd")
 
@@ -211,6 +287,11 @@ class ScheduleTimeGridWidget(QWidget):
         }
 
         if schedule_id is not None:
+            target = self._pick_occurrence(row, col, "編輯")
+            if target is None:
+                return
+            payload["schedule_id"] = target.schedule_id
+            payload["hour"] = target.start.hour
             self.context_action_requested.emit("edit", payload)
         else:
             self.context_action_requested.emit("new", payload)

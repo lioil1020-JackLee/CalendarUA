@@ -44,38 +44,7 @@ def _extract_target_value(schedule: Dict[str, Any]) -> str:
 
 
 def _pick_color(target_value: str) -> tuple[str, str]:
-    normalized = target_value.lower()
-    if "關閉" in target_value or normalized in {"off", "close", "closed"}:
-        return "#008000", "#ffffff"
-    if "休假" in target_value or "holiday" in normalized:
-        return "#800080", "#ffffff"
-    if "自動" in target_value or normalized in {"auto", "automatic"}:
-        return "#ff1a1a", "#ffffff"
-    return "#1f6fd6", "#ffffff"
-
-
-def _get_category_colors(db_manager, category_id: int, fallback_target_value: str = "") -> tuple[str, str]:
-    """
-    取得 Category 顏色,如果無法取得則使用 fallback
-    
-    Args:
-        db_manager: 資料庫管理器 (可為 None)
-        category_id: Category ID
-        fallback_target_value: 當無法取得 category 時用於 _pick_color 的 target_value
-        
-    Returns:
-        (bg_color, fg_color) tuple
-    """
-    if db_manager and category_id:
-        try:
-            category = db_manager.get_category_by_id(category_id)
-            if category:
-                return category['bg_color'], category['fg_color']
-        except Exception:
-            pass
-    
-    # Fallback: 使用原來的 target_value 邏輯
-    return _pick_color(fallback_target_value)
+    return "#ff1a1a", "#ffffff"
 
 
 def _build_holiday_map(holiday_entries: Optional[List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -137,7 +106,7 @@ def _pick_holiday_entry(
         return None
 
     for entry in matched:
-        if entry.get("override_target_value") or entry.get("override_category_id"):
+        if entry.get("override_target_value"):
             return entry
 
     return matched[0]
@@ -189,9 +158,7 @@ def resolve_occurrences_for_range(
         title = _extract_title(schedule)
         target_value = _extract_target_value(schedule)
         
-        # 取得 schedule 的 category 顏色
-        schedule_category_id = schedule.get("category_id", 1)
-        schedule_bg, schedule_fg = _get_category_colors(db_manager, schedule_category_id, target_value)
+        schedule_bg, schedule_fg = _pick_color(target_value)
 
         for trigger in triggers:
             start = trigger
@@ -226,16 +193,7 @@ def resolve_occurrences_for_range(
                 if holiday_entry.get("override_target_value"):
                     resolved_target = str(holiday_entry.get("override_target_value"))
 
-                if holiday_entry.get("override_category_id"):
-                    bg_color, fg_color = _get_category_colors(
-                        db_manager,
-                        int(holiday_entry.get("override_category_id")),
-                        resolved_target,
-                    )
-                elif holiday_entry.get("override_target_value"):
-                    bg_color, fg_color = _pick_color(resolved_target)
-                else:
-                    bg_color, fg_color = schedule_bg, schedule_fg
+                bg_color, fg_color = _pick_color(resolved_target)
             else:
                 bg_color, fg_color = schedule_bg, schedule_fg
 
@@ -258,13 +216,7 @@ def resolve_occurrences_for_range(
 
                 source = "exception"
                 is_exception = True
-                
-                # Exception 可以覆寫 category
-                exception_category_id = exception.get("override_category_id")
-                if exception_category_id:
-                    bg_color, fg_color = _get_category_colors(db_manager, exception_category_id, resolved_target)
-                else:
-                    bg_color, fg_color = _get_category_colors(db_manager, schedule_category_id, resolved_target)
+                bg_color, fg_color = _pick_color(resolved_target)
             else:
                 # 沒有 exception 覆寫,保留 holiday 或 schedule 顏色
                 pass
