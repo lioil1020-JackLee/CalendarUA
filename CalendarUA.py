@@ -291,6 +291,48 @@ class NavCalendarWidget(QCalendarWidget):
         painter.restore()
 
 
+class YearNavComboBox(QComboBox):
+    """年份下拉：支援滑鼠滾輪觸發年份遞增/遞減。"""
+
+    year_step_requested = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.installEventFilter(self)
+        self.view().installEventFilter(self)
+        self.view().viewport().installEventFilter(self)
+
+    def _steps_from_wheel(self, event) -> int:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return 0
+        steps = int(delta / 120)
+        if steps == 0:
+            steps = 1 if delta > 0 else -1
+        return -steps
+
+    def event(self, event):
+        if event.type() == QEvent.Wheel:
+            self.wheelEvent(event)
+            return True
+        return super().event(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and watched in (self, self.view(), self.view().viewport()):
+            steps = self._steps_from_wheel(event)
+            if steps != 0:
+                self.year_step_requested.emit(steps)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event):
+        steps = self._steps_from_wheel(event)
+        if steps != 0:
+            self.year_step_requested.emit(steps)
+        event.accept()
+
+
 class SchedulerWorker(QThread):
     """背景排程工作執行緒"""
 
@@ -455,7 +497,7 @@ class CalendarUA(QMainWindow):
         self.btn_nav_next.setFixedSize(34, 30)
 
         self.combo_nav_month = QComboBox()
-        self.combo_nav_year = QComboBox()
+        self.combo_nav_year = YearNavComboBox()
         # 下拉箭頭隱藏後，可用較緊湊寬度並避免與右箭頭重疊
         self.combo_nav_month.setFixedWidth(64)
         # 年度需要完整顯示四位數
@@ -610,13 +652,14 @@ class CalendarUA(QMainWindow):
         view_toolbar.addStretch()
 
         # 右側按鈕區：日/週/月/假日（可高亮）
+        self.btn_view_schedule_list = QPushButton("排程清單")
         self.btn_view_day = QPushButton("日")
         self.btn_view_week = QPushButton("週")
         self.btn_view_month = QPushButton("月")
         self.btn_holiday_settings = QPushButton("假日")
-        for btn in (self.btn_view_day, self.btn_view_week, self.btn_view_month):
+        for btn in (self.btn_view_schedule_list, self.btn_view_day, self.btn_view_week, self.btn_view_month):
             btn.setCheckable(True)
-            btn.setMinimumWidth(48)
+            btn.setMinimumWidth(48 if btn != self.btn_view_schedule_list else 88)
             view_toolbar.addWidget(btn)
         self.btn_holiday_settings.setCheckable(False)
         self.btn_holiday_settings.setMinimumWidth(48)
@@ -629,9 +672,16 @@ class CalendarUA(QMainWindow):
         self.day_view = DayViewWidget()
         self.week_view = WeekViewWidget()
         self.month_view = MonthViewWidget()
+        self.schedule_list_view = QTreeWidget()
+        self.schedule_list_view.setColumnCount(2)
+        self.schedule_list_view.setHeaderLabels(["欄位", "內容"])
+        self.schedule_list_view.setRootIsDecorated(True)
+        self.schedule_list_view.setAlternatingRowColors(True)
+        self.schedule_list_view.setUniformRowHeights(False)
         self.calendar_stack.addWidget(self.day_view)
         self.calendar_stack.addWidget(self.week_view)
         self.calendar_stack.addWidget(self.month_view)
+        self.calendar_stack.addWidget(self.schedule_list_view)
         right_layout.addWidget(self.calendar_stack)
 
         # 資料庫狀態列
@@ -650,9 +700,11 @@ class CalendarUA(QMainWindow):
         self.btn_nav_next.clicked.connect(lambda: self._shift_nav_month(1))
         self.combo_nav_month.currentIndexChanged.connect(self._on_nav_combo_changed)
         self.combo_nav_year.currentIndexChanged.connect(self._on_nav_combo_changed)
+        self.combo_nav_year.year_step_requested.connect(self._on_nav_year_wheel_step)
         self.btn_nav_today.clicked.connect(self._go_to_today_from_nav)
         self.btn_main_prev.clicked.connect(lambda: self._shift_main_range(-1))
         self.btn_main_next.clicked.connect(lambda: self._shift_main_range(1))
+        self.btn_view_schedule_list.clicked.connect(lambda: self._set_view_mode("list"))
         self.btn_view_day.clicked.connect(lambda: self._set_view_mode("day"))
         self.btn_view_week.clicked.connect(lambda: self._set_view_mode("week"))
         self.btn_view_month.clicked.connect(lambda: self._set_view_mode("month"))
@@ -667,6 +719,8 @@ class CalendarUA(QMainWindow):
         # 將 Day / Week / Month 視圖的右鍵動作導向主視窗邏輯
         self.day_view.context_action_requested.connect(self._on_calendar_context_action)
         self.week_view.context_action_requested.connect(self._on_calendar_context_action)
+        self.day_view.time_scale_changed.connect(self._on_time_scale_changed)
+        self.week_view.time_scale_changed.connect(self._on_time_scale_changed)
         self.month_view.context_action_requested.connect(self._on_calendar_context_action)
         self.month_view.date_selected.connect(self._on_main_calendar_date_selected)
 
@@ -883,6 +937,7 @@ class CalendarUA(QMainWindow):
                     border: 1px solid #106ebe;
                 }
             """
+        self.btn_view_schedule_list.setStyleSheet(toggle_style)
         self.btn_view_day.setStyleSheet(toggle_style)
         self.btn_view_week.setStyleSheet(toggle_style)
         self.btn_view_month.setStyleSheet(toggle_style)
@@ -1245,10 +1300,7 @@ class CalendarUA(QMainWindow):
         self.combo_nav_month.addItems(months)
 
         current_year = QDate.currentDate().year()
-        years = list(range(current_year - 5, current_year + 6))
-        self.combo_nav_year.clear()
-        for y in years:
-            self.combo_nav_year.addItem(str(y), y)
+        self._set_nav_year_window(current_year, current_year)
 
         # 設定當前年/月與預設 reference_date（高亮落在今日）
         today = QDate.currentDate()
@@ -1257,12 +1309,58 @@ class CalendarUA(QMainWindow):
         self.combo_nav_month.blockSignals(True)
         self.combo_nav_year.blockSignals(True)
         self.combo_nav_month.setCurrentIndex(today.month() - 1)
-        year_index = years.index(today.year())
+        year_index = self.combo_nav_year.findData(today.year())
         self.combo_nav_year.setCurrentIndex(year_index)
         self.combo_nav_month.blockSignals(False)
         self.combo_nav_year.blockSignals(False)
         # 依 reference_date 同步兩個小月曆與主行事曆
         self._update_nav_calendars(today.year(), today.month())
+
+    def _set_nav_year_window(self, center_year: int, selected_year: Optional[int] = None):
+        """設定年份下拉視窗（固定 11 個選項，中心可滑動）。"""
+        start_year = center_year - 5
+        years = list(range(start_year, start_year + 11))
+
+        target_year = selected_year if isinstance(selected_year, int) else center_year
+        if target_year < years[0]:
+            target_year = years[0]
+        elif target_year > years[-1]:
+            target_year = years[-1]
+
+        self.combo_nav_year.blockSignals(True)
+        self.combo_nav_year.clear()
+        for y in years:
+            self.combo_nav_year.addItem(str(y), y)
+
+        target_index = self.combo_nav_year.findData(target_year)
+        if target_index >= 0:
+            self.combo_nav_year.setCurrentIndex(target_index)
+        self.combo_nav_year.blockSignals(False)
+
+    def _ensure_nav_year_available(self, year: int) -> int:
+        """確保年份下拉內含指定年份。"""
+        index = self.combo_nav_year.findData(year)
+        if index >= 0:
+            return index
+
+        self._set_nav_year_window(year, year)
+        return self.combo_nav_year.findData(year)
+
+    def _on_nav_year_wheel_step(self, steps: int):
+        """滑鼠滾輪平移年份選項視窗，不直接切換行事曆。"""
+        if steps == 0:
+            return
+
+        center_idx = min(5, max(0, self.combo_nav_year.count() - 1))
+        center_year = self.combo_nav_year.itemData(center_idx)
+        if not isinstance(center_year, int):
+            center_year = QDate.currentDate().year()
+
+        selected_year = self.combo_nav_year.currentData()
+        if not isinstance(selected_year, int):
+            selected_year = center_year
+
+        self._set_nav_year_window(center_year + steps, selected_year)
 
     def _update_nav_calendars(self, year: int, month: int):
         """同步更新兩個導覽月曆的顯示月份"""
@@ -1292,7 +1390,7 @@ class CalendarUA(QMainWindow):
         self.reference_date = qd
         # 更新下拉與月曆
         self.combo_nav_month.setCurrentIndex(qd.month() - 1)
-        year_index = self.combo_nav_year.findData(qd.year())
+        year_index = self._ensure_nav_year_available(qd.year())
         if year_index >= 0:
             self.combo_nav_year.setCurrentIndex(year_index)
         self._update_nav_calendars(qd.year(), qd.month())
@@ -1353,7 +1451,7 @@ class CalendarUA(QMainWindow):
             self.combo_nav_month.blockSignals(True)
             self.combo_nav_year.blockSignals(True)
             self.combo_nav_month.setCurrentIndex(new_base_first.month() - 1)
-            year_index = self.combo_nav_year.findData(new_base_first.year())
+            year_index = self._ensure_nav_year_available(new_base_first.year())
             if year_index >= 0:
                 self.combo_nav_year.setCurrentIndex(year_index)
             self.combo_nav_month.blockSignals(False)
@@ -1378,7 +1476,7 @@ class CalendarUA(QMainWindow):
         self.combo_nav_month.blockSignals(True)
         self.combo_nav_year.blockSignals(True)
         self.combo_nav_month.setCurrentIndex(qdate.month() - 1)
-        year_index = self.combo_nav_year.findData(qdate.year())
+        year_index = self._ensure_nav_year_available(qdate.year())
         if year_index >= 0:
             self.combo_nav_year.setCurrentIndex(year_index)
         self.combo_nav_month.blockSignals(False)
@@ -1395,7 +1493,7 @@ class CalendarUA(QMainWindow):
         self.combo_nav_month.blockSignals(True)
         self.combo_nav_year.blockSignals(True)
         self.combo_nav_month.setCurrentIndex(today.month() - 1)
-        year_index = self.combo_nav_year.findData(today.year())
+        year_index = self._ensure_nav_year_available(today.year())
         if year_index >= 0:
             self.combo_nav_year.setCurrentIndex(year_index)
         self.combo_nav_month.blockSignals(False)
@@ -1417,11 +1515,14 @@ class CalendarUA(QMainWindow):
         """切換 Day / Week / Month / Year 視圖"""
         self.current_view_mode = mode
 
+        self.btn_view_schedule_list.setChecked(mode == "list")
         self.btn_view_day.setChecked(mode == "day")
         self.btn_view_week.setChecked(mode == "week")
         self.btn_view_month.setChecked(mode == "month")
 
-        if mode == "day":
+        if mode == "list":
+            self.calendar_stack.setCurrentIndex(3)
+        elif mode == "day":
             self.calendar_stack.setCurrentIndex(0)
         elif mode == "week":
             self.calendar_stack.setCurrentIndex(1)
@@ -1442,7 +1543,9 @@ class CalendarUA(QMainWindow):
         if not isinstance(self.reference_date, QDate) or not self.reference_date.isValid():
             self.reference_date = QDate.currentDate()
 
-        if self.current_view_mode == "day":
+        if self.current_view_mode == "list":
+            return
+        elif self.current_view_mode == "day":
             self.reference_date = self.reference_date.addDays(delta)
         elif self.current_view_mode == "week":
             self.reference_date = self.reference_date.addDays(delta * 7)
@@ -1457,6 +1560,11 @@ class CalendarUA(QMainWindow):
     def _refresh_main_calendar_views(self):
         """依目前 view mode 與日期，更新 Day/Week/Month 行事曆內容"""
         if not self.db_manager:
+            return
+
+        if self.current_view_mode == "list":
+            self.label_current_range.setText("排程參數清單")
+            self._refresh_schedule_list_view()
             return
 
         from datetime import datetime, timedelta
@@ -1520,14 +1628,62 @@ class CalendarUA(QMainWindow):
         self.month_view.set_selected_date(self.reference_date)
         self.month_view.set_occurrences(occurrences)
 
+    def _refresh_schedule_list_view(self):
+        """更新右側排程參數清單視圖。"""
+        self.schedule_list_view.clear()
+
+        if not self.schedules:
+            empty_item = QTreeWidgetItem(self.schedule_list_view)
+            empty_item.setText(0, "提示")
+            empty_item.setText(1, "目前沒有排程")
+            return
+
+        for schedule in self.schedules:
+            schedule_id = int(schedule.get("id", 0) or 0)
+            title = str(schedule.get("task_name", "")).strip() or f"任務{schedule_id}"
+
+            root = QTreeWidgetItem(self.schedule_list_view)
+            root.setText(0, f"{title} (ID:{schedule_id})")
+            root.setText(1, "")
+
+            rrule_str = str(schedule.get("rrule_str", "") or "")
+            description = self._format_schedule_description(rrule_str, schedule_id=schedule_id)
+            next_exec = self._calculate_next_execution_time(schedule)
+            lock_text = "是" if bool(schedule.get("lock_enabled", 0)) else "否"
+
+            fields = [
+                ("啟用", "是" if bool(schedule.get("is_enabled", 1)) else "否"),
+                ("Lock", lock_text),
+                ("OPC URL", str(schedule.get("opc_url", "") or "")),
+                ("Node ID", str(schedule.get("node_id", "") or "")),
+                ("目標值", str(schedule.get("target_value", "") or "")),
+                ("資料型別", str(schedule.get("data_type", "auto") or "auto")),
+                ("週期規則", description),
+                ("RRULE", rrule_str),
+                ("下次執行", next_exec),
+                ("最後狀態", str(schedule.get("last_execution_status", "") or "")),
+                ("忽略假日", "是" if bool(schedule.get("ignore_holiday", 0)) else "否"),
+            ]
+
+            for key, value in fields:
+                child = QTreeWidgetItem(root)
+                child.setText(0, key)
+                child.setText(1, value)
+
+            root.setExpanded(True)
+
+        self.schedule_list_view.resizeColumnToContents(0)
+
     def _on_calendar_context_action(self, action: str, payload: dict):
         """處理 Day/Week/Month 視圖發出的右鍵選單動作"""
         schedule_id = payload.get("schedule_id")
         date_str = payload.get("date")
         hour = payload.get("hour")
+        minute = payload.get("minute")
 
         # 記錄本次操作預設小時，供新增排程時帶入 RecurrenceDialog
         self._context_default_hour = hour if isinstance(hour, int) else None
+        self._context_default_minute = minute if isinstance(minute, int) else 0
         if date_str:
             try:
                 y, m, d = map(int, date_str.split("-"))
@@ -1542,7 +1698,12 @@ class CalendarUA(QMainWindow):
         elif action == "edit":
             if schedule_id:
                 # 將當前點選的日期與小時帶入，用於 RecurrenceDialog 預設時間
-                self.edit_schedule(schedule_id, default_date=self.reference_date, default_hour=self._context_default_hour)
+                self.edit_schedule(
+                    schedule_id,
+                    default_date=self.reference_date,
+                    default_hour=self._context_default_hour,
+                    default_minute=self._context_default_minute,
+                )
             else:
                 QMessageBox.information(self, "提示", "此日期尚未有行程可編輯。")
         elif action == "delete":
@@ -1568,6 +1729,8 @@ class CalendarUA(QMainWindow):
             if self.db_manager.init_db():
                 self.db_status_label.setText("資料庫: 已連線")
                 self.db_status_label.setStyleSheet("color: green;")
+
+                self._load_time_scale_from_db()
 
                 self.load_schedules()
                 self.start_scheduler()
@@ -1604,6 +1767,26 @@ class CalendarUA(QMainWindow):
         """全局設定變更時的處理"""
         self.status_bar.showMessage("全局設定已更新")
         # 若未來需要，可在此讀取 general_settings 調整排程行為
+
+    def _load_time_scale_from_db(self):
+        """從資料庫載入日/週視圖時間刻度。"""
+        if not self.db_manager:
+            return
+
+        minutes = self.db_manager.get_time_scale_minutes()
+        self.day_view.set_time_scale(minutes)
+        self.week_view.set_time_scale(minutes)
+
+    def _on_time_scale_changed(self, minutes: int):
+        """同步日/週視圖刻度並保存到資料庫。"""
+        sender = self.sender()
+        if sender is self.day_view and self.week_view.time_scale_minutes != minutes:
+            self.week_view.set_time_scale(minutes)
+        elif sender is self.week_view and self.day_view.time_scale_minutes != minutes:
+            self.day_view.set_time_scale(minutes)
+
+        if self.db_manager:
+            self.db_manager.save_time_scale_minutes(minutes)
 
     def _format_schedule_description(self, rrule_str: str, schedule_id: int = 0) -> str:
         """將 RRULE 轉換為中文簡易說明"""
@@ -1923,8 +2106,14 @@ class CalendarUA(QMainWindow):
         # 嘗試從目前 reference_date 與右鍵 payload 帶入時間
         default_date = getattr(self, "reference_date", QDate.currentDate())
         default_hour = getattr(self, "_context_default_hour", None)
+        default_minute = getattr(self, "_context_default_minute", 0)
 
-        dialog = ScheduleEditDialog(self, default_date=default_date, default_hour=default_hour)
+        dialog = ScheduleEditDialog(
+            self,
+            default_date=default_date,
+            default_hour=default_hour,
+            default_minute=default_minute,
+        )
         if dialog.exec() == QDialog.Accepted:
             data = dialog.get_data()
 
@@ -1943,6 +2132,7 @@ class CalendarUA(QMainWindow):
                     opc_password=data.get("opc_password", ""),
                     opc_timeout=data.get("opc_timeout", 5),
                     opc_write_timeout=data.get("opc_write_timeout", 3),
+                    lock_enabled=data.get("lock_enabled", 0),
                     is_enabled=data.get("is_enabled", 1),
                     ignore_holiday=data.get("ignore_holiday", 0),
                 )
@@ -1953,7 +2143,13 @@ class CalendarUA(QMainWindow):
                 else:
                     QMessageBox.critical(self, "錯誤", "新增排程失敗")
 
-    def edit_schedule(self, schedule_id: int = None, default_date: QDate | None = None, default_hour: int | None = None):
+    def edit_schedule(
+        self,
+        schedule_id: int = None,
+        default_date: QDate | None = None,
+        default_hour: int | None = None,
+        default_minute: int = 0,
+    ):
         """編輯排程（可帶入目前點選的日期/時間，供週期對話框預設使用）"""
         if schedule_id is None:
             QMessageBox.information(self, "提示", "請先選擇要編輯的排程")
@@ -1963,7 +2159,13 @@ class CalendarUA(QMainWindow):
         if not schedule:
             return
 
-        dialog = ScheduleEditDialog(self, schedule, default_date=default_date, default_hour=default_hour)
+        dialog = ScheduleEditDialog(
+            self,
+            schedule,
+            default_date=default_date,
+            default_hour=default_hour,
+            default_minute=default_minute,
+        )
         if dialog.exec() == QDialog.Accepted:
             data = dialog.get_data()
 
@@ -1983,6 +2185,7 @@ class CalendarUA(QMainWindow):
                     opc_password=data.get("opc_password", ""),
                     opc_timeout=data.get("opc_timeout", 5),
                     opc_write_timeout=data.get("opc_write_timeout", 3),
+                    lock_enabled=data.get("lock_enabled", 0),
                     is_enabled=data.get("is_enabled", 1),
                     ignore_holiday=data.get("ignore_holiday", 0),
                 )
@@ -2197,6 +2400,7 @@ class CalendarUA(QMainWindow):
     def on_task_triggered(self, schedule: Dict[str, Any]):
         """處理排程觸發"""
         schedule_id = schedule.get("id")
+        trigger_time = datetime.now()
         
         # 檢查是否已經在執行，防止重複執行
         if schedule_id in self.running_tasks:
@@ -2209,15 +2413,17 @@ class CalendarUA(QMainWindow):
         self.status_bar.showMessage(f"執行排程: {schedule.get('task_name', '')}")
 
         # 執行 OPC UA 寫入
-        asyncio.create_task(self.execute_task(schedule))
+        asyncio.create_task(self.execute_task(schedule, trigger_time=trigger_time))
 
-    async def execute_task(self, schedule: Dict[str, Any]):
+    async def execute_task(self, schedule: Dict[str, Any], trigger_time: Optional[datetime] = None):
         """執行排程任務"""
         schedule_id = schedule.get("id")
         opc_url = schedule.get("opc_url", "")
         node_id = schedule.get("node_id", "")
         target_value = schedule.get("target_value", "")
         data_type = schedule.get("data_type", "auto")
+        lock_enabled = bool(schedule.get("lock_enabled", 0))
+        effective_trigger_time = (trigger_time or datetime.now()).replace(microsecond=0)
 
         # 解析 node_id，提取實際的 OPC UA Node ID
         import re
@@ -2275,81 +2481,85 @@ class CalendarUA(QMainWindow):
 
             async with handler:
                 if handler.is_connected:
-                    # 重試機制：根據期間決定重試策略
                     duration_minutes = self._parse_duration_from_rrule(schedule.get("rrule_str", ""))
-                    
-                    if duration_minutes == 0:
-                        # 期間=0分：只嘗試寫入一次，不重試
-                        max_retries = 1
-                        retry_delay = write_timeout
-                    else:
-                        # 期間>0分：持續寫入直到成功或結束時間到
-                        max_retries = float('inf')  # 無限重試，直到成功或時間到
-                        retry_delay = write_timeout
-                    
+                    retry_delay = max(1, int(write_timeout or 1))
+                    period_end_time = effective_trigger_time + timedelta(minutes=duration_minutes)
+
                     attempt = 0
                     success_once = False
-                    
-                    while attempt < max_retries and not success_once:
-                        # 檢查是否超過結束時間（對於期間>0的情況）
-                        if duration_minutes > 0:
-                            current_time = datetime.now()
-                            # 這裡需要解析結束時間，簡化處理：假設結束時間是開始時間 + 期間
-                            # 實際上應該從RRULE解析結束時間
-                            if current_time >= self._calculate_end_time(schedule):
-                                break  # 超過結束時間，停止重試
-                        
+
+                    while True:
+                        now = datetime.now()
+                        window_expired = duration_minutes > 0 and now >= period_end_time
+
+                        if lock_enabled and window_expired:
+                            break
+
+                        if not lock_enabled:
+                            if duration_minutes == 0 and attempt > 0:
+                                break
+                            if duration_minutes > 0 and window_expired and attempt > 0:
+                                break
+
+                        attempt += 1
+
                         try:
                             success = await handler.write_node(actual_node_id, target_value, data_type)
                             if success:
-                                status_msg = f"✓ 成功寫入 {node_id} = {target_value}"
                                 success_once = True
-                                if self.db_manager:
-                                    self.db_manager.update_execution_status(schedule_id, "執行成功")
-                                    # 增加執行計數器
-                                    self.execution_counts[schedule_id] = self.execution_counts.get(schedule_id, 0) + 1
-                                    # 檢查是否達到 COUNT 上限
-                                    self._check_and_disable_if_count_reached(schedule_id, schedule.get("rrule_str", ""))
-                                break  # 成功一次就結束
-                            else:
-                                if attempt < max_retries - 1 or max_retries == float('inf'):
-                                    if duration_minutes == 0:
-                                        # 期間=0分，只嘗試一次
-                                        status_msg = f"✗ 寫入失敗: {node_id}"
-                                        if self.db_manager:
-                                            self.db_manager.update_execution_status(schedule_id, "寫入失敗")
-                                    else:
-                                        # 期間>0分，正在重試
-                                        status_msg = f"寫入失敗，正在等待 {retry_delay} 秒後重試..."
-                                        logger.warning(f"寫入失敗，正在等待 {retry_delay} 秒後重試")
-                                        await asyncio.sleep(retry_delay)
-                                else:
-                                    # 最後一次嘗試失敗
-                                    status_msg = f"✗ 寫入失敗: {node_id}"
-                                    if self.db_manager:
-                                        self.db_manager.update_execution_status(schedule_id, "寫入失敗")
-                        except Exception as e:
-                            if attempt < max_retries - 1 or max_retries == float('inf'):
-                                if duration_minutes == 0:
-                                    # 期間=0分，只嘗試一次
-                                    status_msg = f"✗ 執行錯誤: {str(e)[:50]}"
-                                    if self.db_manager:
-                                        self.db_manager.update_execution_status(schedule_id, f"執行錯誤: {str(e)[:50]}")
-                                else:
-                                    # 期間>0分，正在重試
-                                    status_msg = f"執行錯誤，正在等待 {retry_delay} 秒後重試..."
-                                    logger.warning(f"寫入錯誤: {e}，正在等待 {retry_delay} 秒後重試")
-                                    await asyncio.sleep(retry_delay)
-                            else:
-                                # 最後一次嘗試失敗
-                                status_msg = f"✗ 執行錯誤: {str(e)[:50]}"
-                                if self.db_manager:
-                                    self.db_manager.update_execution_status(schedule_id, f"執行錯誤: {str(e)[:50]}")
+
+                                if not lock_enabled:
+                                    status_msg = f"✓ 成功寫入 {node_id} = {target_value}"
+                                    break
+
+                                if duration_minutes <= 0:
+                                    status_msg = f"✓ 成功寫入 {node_id} = {target_value}"
+                                    break
+
+                                status_msg = f"Lock 生效中，持續鎖定 {node_id} 到 {period_end_time.strftime('%H:%M:%S')}"
+                                await asyncio.sleep(retry_delay)
+                                continue
+
+                            status_msg = f"✗ 寫入失敗: {node_id}"
+
+                            if duration_minutes == 0 and not lock_enabled:
                                 break
-                        attempt += 1
+
+                            if duration_minutes > 0 and datetime.now() >= period_end_time:
+                                break
+
+                            logger.warning(f"寫入失敗，等待 {retry_delay} 秒後重試")
+                            await asyncio.sleep(retry_delay)
+                            continue
+
+                        except Exception as e:
+                            status_msg = f"✗ 執行錯誤: {str(e)[:50]}"
+
+                            if duration_minutes == 0 and not lock_enabled:
+                                break
+
+                            if duration_minutes > 0 and datetime.now() >= period_end_time:
+                                break
+
+                            logger.warning(f"寫入錯誤: {e}，等待 {retry_delay} 秒後重試")
+                            await asyncio.sleep(retry_delay)
+                            continue
+
+                    if success_once:
+                        if self.db_manager:
+                            if lock_enabled and duration_minutes > 0:
+                                self.db_manager.update_execution_status(schedule_id, "鎖定期間完成")
+                            else:
+                                self.db_manager.update_execution_status(schedule_id, "執行成功")
+
+                        # 增加執行計數器
+                        self.execution_counts[schedule_id] = self.execution_counts.get(schedule_id, 0) + 1
+                        # 檢查是否達到 COUNT 上限
+                        self._check_and_disable_if_count_reached(schedule_id, schedule.get("rrule_str", ""))
                     else:
-                        # 如果所有重試都失敗，這裡不會執行，因為break會跳出
-                        pass
+                        if self.db_manager:
+                            self.db_manager.update_execution_status(schedule_id, "寫入失敗")
+                        status_msg = f"✗ 寫入失敗: {node_id}"
                 else:
                     status_msg = f"✗ 無法連線 OPC UA: {opc_url}"
                     if self.db_manager:
@@ -2376,36 +2586,19 @@ class CalendarUA(QMainWindow):
             parts = rrule_str.upper().split(';')
             for part in parts:
                 if part.startswith('DURATION=PT'):
-                    # 格式如: DURATION=PT5M
-                    duration_str = part.split('=')[1]  # PT5M
-                    if duration_str.endswith('M'):
-                        minutes = int(duration_str[2:-1])  # 移除PT和M
-                        return minutes
+                    duration_str = part.split('=')[1]
+                    match = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration_str)
+                    if not match:
+                        continue
+
+                    hours = int(match.group(1) or 0)
+                    minutes = int(match.group(2) or 0)
+                    seconds = int(match.group(3) or 0)
+                    total_minutes = hours * 60 + minutes + (1 if seconds > 0 else 0)
+                    return total_minutes
         except Exception:
             pass
         return 0
-
-    def _calculate_end_time(self, schedule: Dict[str, Any]) -> datetime:
-        """計算任務的結束時間"""
-        # 簡化實作：從開始時間 + 期間計算
-        # 實際應該從RRULE解析完整的結束時間
-        start_time_str = schedule.get("start_time", "")
-        duration_minutes = self._parse_duration_from_rrule(schedule.get("rrule_str", ""))
-        
-        try:
-            # 假設start_time是HH:MM格式，轉換為今天的datetime
-            today = datetime.now().date()
-            time_part = datetime.strptime(start_time_str, "%H:%M").time()
-            start_datetime = datetime.combine(today, time_part)
-            
-            # 如果開始時間已經過去，可能是明天
-            if start_datetime < datetime.now():
-                start_datetime += timedelta(days=1)
-            
-            return start_datetime + timedelta(minutes=duration_minutes)
-        except Exception:
-            # 預設1小時後結束
-            return datetime.now() + timedelta(hours=1)
 
     def _check_and_disable_if_count_reached(self, schedule_id: int, rrule_str: str):
         """檢查是否達到 COUNT 上限，如果是則停用排程"""
@@ -2442,6 +2635,8 @@ class CalendarUA(QMainWindow):
         # 重新初始化資料庫管理器
         self.db_manager = SQLiteManager(new_path)
         self.db_manager.init_db()
+
+        self._load_time_scale_from_db()
 
         # 重新載入排程資料
         self.load_schedules()
@@ -3598,6 +3793,7 @@ class ScheduleEditDialog(QDialog):
         schedule: Dict[str, Any] = None,
         default_date: Optional[QDate] = None,
         default_hour: Optional[int] = None,
+        default_minute: int = 0,
     ):
         super().__init__(parent)
         self.schedule = schedule
@@ -3606,6 +3802,7 @@ class ScheduleEditDialog(QDialog):
         # 從主行事曆帶入的預設日期/時間（例如右鍵點選的格子）
         self.default_date: Optional[QDate] = default_date
         self.default_hour: Optional[int] = default_hour
+        self.default_minute: int = max(0, min(59, default_minute))
 
         # 取得資料庫管理器
         self.db_manager = parent.db_manager if parent and hasattr(parent, 'db_manager') else None
@@ -3724,7 +3921,11 @@ class ScheduleEditDialog(QDialog):
         recurrence_group = QGroupBox("週期設定")
         recurrence_layout = QVBoxLayout(recurrence_group)
 
-        initial_time = QTime(self.default_hour, 0, 0) if self.default_hour is not None else None
+        initial_time = (
+            QTime(self.default_hour, self.default_minute, 0)
+            if self.default_hour is not None
+            else None
+        )
         self.recurrence_editor = RecurrenceDialog(
             self,
             current_rrule=self.schedule.get("rrule_str", "") if self.schedule else "",
@@ -3948,6 +4149,7 @@ class ScheduleEditDialog(QDialog):
         
         self.enabled_checkbox.setChecked(bool(self.schedule.get("is_enabled", 1)))
         self.ignore_holiday_checkbox.setChecked(bool(self.schedule.get("ignore_holiday", 0)))
+        self.recurrence_editor.set_lock_enabled(bool(self.schedule.get("lock_enabled", 0)))
 
     def get_data(self) -> Dict[str, Any]:
         """取得編輯的資料"""
@@ -3971,6 +4173,7 @@ class ScheduleEditDialog(QDialog):
             "opc_password": self.opc_password,
             "opc_timeout": self.opc_timeout,
             "opc_write_timeout": self.opc_write_timeout,
+            "lock_enabled": 1 if self.recurrence_editor.get_lock_enabled() else 0,
             "is_enabled": 1 if self.enabled_checkbox.isChecked() else 0,
             "ignore_holiday": 1 if self.ignore_holiday_checkbox.isChecked() else 0,
         }

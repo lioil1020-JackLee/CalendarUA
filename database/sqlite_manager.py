@@ -195,6 +195,7 @@ class SQLiteManager:
             opc_username TEXT DEFAULT '',
             opc_password TEXT DEFAULT '',
             opc_timeout INTEGER DEFAULT 10,
+            lock_enabled INTEGER DEFAULT 0,
             is_enabled INTEGER DEFAULT 1,
             ignore_holiday INTEGER DEFAULT 0,
             last_execution_status TEXT DEFAULT '',
@@ -254,6 +255,7 @@ class SQLiteManager:
                         last_opc_password TEXT DEFAULT '',
                         last_opc_timeout INTEGER DEFAULT 5,
                         last_opc_write_timeout INTEGER DEFAULT 3,
+                        time_scale_minutes INTEGER DEFAULT 60,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -288,6 +290,10 @@ class SQLiteManager:
                 if 'ignore_holiday' not in columns:
                     cursor.execute("ALTER TABLE schedules ADD COLUMN ignore_holiday INTEGER DEFAULT 0")
                     logger.info("已添加 ignore_holiday 欄位")
+
+                if 'lock_enabled' not in columns:
+                    cursor.execute("ALTER TABLE schedules ADD COLUMN lock_enabled INTEGER DEFAULT 0")
+                    logger.info("已添加 lock_enabled 欄位")
 
                 # 建立索引以提升查詢效能
                 cursor.execute(
@@ -390,6 +396,12 @@ class SQLiteManager:
                     )
                     logger.info("已添加 ignore_holiday 欄位")
 
+                if "lock_enabled" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE schedules ADD COLUMN lock_enabled INTEGER DEFAULT 0"
+                    )
+                    logger.info("已添加 lock_enabled 欄位")
+
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS schedule_exceptions (
@@ -478,6 +490,9 @@ class SQLiteManager:
                 if "last_opc_write_timeout" not in general_columns:
                     cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_write_timeout INTEGER DEFAULT 3")
                     logger.info("已添加 general_settings.last_opc_write_timeout 欄位")
+                if "time_scale_minutes" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN time_scale_minutes INTEGER DEFAULT 60")
+                    logger.info("已添加 general_settings.time_scale_minutes 欄位")
 
                 # 依照下一次執行時間優化查詢效能（排程掃描常用）
                 cursor.execute(
@@ -504,6 +519,7 @@ class SQLiteManager:
         opc_password: str = "",
         opc_timeout: int = 5,
         opc_write_timeout: int = 3,
+        lock_enabled: int = 0,
         is_enabled: int = 1,
         ignore_holiday: int = 0,
     ) -> Optional[int]:
@@ -523,6 +539,7 @@ class SQLiteManager:
             opc_password: OPC密碼
             opc_timeout: 連線超時秒數
             opc_write_timeout: 寫值重試延遲秒數
+            lock_enabled: 是否啟用鎖定模式 (1: 鎖定, 0: 不鎖定)
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
             ignore_holiday: 是否忽略假日規則 (1: 忽略, 0: 不忽略)
 
@@ -531,8 +548,8 @@ class SQLiteManager:
         """
         insert_sql = """
         INSERT INTO schedules (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled, ignore_holiday)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, lock_enabled, is_enabled, ignore_holiday)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         try:
@@ -541,7 +558,7 @@ class SQLiteManager:
                 cursor.execute(
                     insert_sql,
                     (task_name, opc_url, node_id, target_value, data_type, rrule_str,
-                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, is_enabled, ignore_holiday),
+                     opc_security_policy, opc_security_mode, opc_username, opc_password, opc_timeout, opc_write_timeout, lock_enabled, is_enabled, ignore_holiday),
                 )
                 conn.commit()
                 new_id = cursor.lastrowid
@@ -632,6 +649,7 @@ class SQLiteManager:
         opc_password: str = "",
         opc_timeout: int = 5,
         opc_write_timeout: int = 3,
+        lock_enabled: int = 0,
         is_enabled: int = 1,
         ignore_holiday: int = 0,
     ) -> Optional[int]:
@@ -650,6 +668,7 @@ class SQLiteManager:
             opc_password: OPC密碼
             opc_timeout: 連線超時秒數
             opc_write_timeout: 寫值重試延遲秒數
+            lock_enabled: 是否啟用鎖定模式 (1: 鎖定, 0: 不鎖定)
             is_enabled: 是否啟用 (1: 啟用, 0: 停用)，預設為 1
             ignore_holiday: 是否忽略假日規則 (1: 忽略, 0: 不忽略)
 
@@ -669,6 +688,7 @@ class SQLiteManager:
             opc_password=opc_password,
             opc_timeout=opc_timeout,
             opc_write_timeout=opc_write_timeout,
+            lock_enabled=lock_enabled,
             is_enabled=is_enabled,
             ignore_holiday=ignore_holiday,
         )
@@ -725,6 +745,7 @@ class SQLiteManager:
             "opc_password",
             "opc_timeout",
             "opc_write_timeout",
+            "lock_enabled",
             "is_enabled",
             "ignore_holiday",
             "last_execution_status",
@@ -1389,6 +1410,54 @@ class SQLiteManager:
                 return True
         except sqlite3.Error as e:
             logger.error(f"儲存最後 OPC 設定失敗: {e}")
+            return False
+
+    def get_time_scale_minutes(self) -> int:
+        """取得日/週視圖時間刻度（分鐘）。"""
+        settings = self.get_general_settings() or {}
+        value = settings.get("time_scale_minutes", 60)
+        try:
+            minutes = int(value)
+        except (TypeError, ValueError):
+            minutes = 60
+
+        return minutes if minutes in {5, 6, 10, 15, 30, 60} else 60
+
+    def save_time_scale_minutes(self, minutes: int) -> bool:
+        """儲存日/週視圖時間刻度（分鐘）。"""
+        if minutes not in {5, 6, 10, 15, 30, 60}:
+            return False
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM general_settings LIMIT 1")
+                existing = cursor.fetchone()
+
+                if existing:
+                    cursor.execute(
+                        """
+                        UPDATE general_settings
+                        SET time_scale_minutes = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (minutes, existing["id"]),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO general_settings (
+                            profile_name, description, enable_schedule, scan_rate, refresh_rate, time_scale_minutes
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        ("預設 Profile", "CalendarUA 排程系統", 1, 1, 5, minutes),
+                    )
+
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"儲存 time scale 失敗: {e}")
             return False
 
     # ==================== Runtime Override ====================

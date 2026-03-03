@@ -115,11 +115,13 @@ class DropdownNavCalendar(QCalendarWidget):
         self.combo_year.currentIndexChanged.connect(self._apply_page_from_nav)
         self.combo_month.currentIndexChanged.connect(self._apply_page_from_nav)
         self.currentPageChanged.connect(lambda _year, _month: self._sync_nav_from_page())
+        self.combo_year.installEventFilter(self)
+        self.combo_year.view().installEventFilter(self)
+        self.combo_year.view().viewport().installEventFilter(self)
 
     def _init_nav_values(self):
-        self.combo_year.clear()
-        for year in range(2021, 2032):
-            self.combo_year.addItem(str(year), year)
+        current_year = QDate.currentDate().year()
+        self._set_year_window(current_year, current_year)
 
         self.combo_month.clear()
         for month in range(1, 13):
@@ -138,12 +140,7 @@ class DropdownNavCalendar(QCalendarWidget):
         year = self.yearShown()
         month = self.monthShown()
 
-        if year < 2021:
-            year = 2021
-            self.setCurrentPage(year, month)
-        elif year > 2031:
-            year = 2031
-            self.setCurrentPage(year, month)
+        self._ensure_year_available(year)
 
         year_index = self.combo_year.findData(year)
         month_index = self.combo_month.findData(month)
@@ -156,6 +153,61 @@ class DropdownNavCalendar(QCalendarWidget):
             self.combo_month.setCurrentIndex(month_index)
         self.combo_year.blockSignals(False)
         self.combo_month.blockSignals(False)
+
+    def _set_year_window(self, center_year: int, selected_year: int | None = None):
+        start_year = center_year - 5
+        years = list(range(start_year, start_year + 11))
+
+        target_year = selected_year if isinstance(selected_year, int) else center_year
+        if target_year < years[0]:
+            target_year = years[0]
+        elif target_year > years[-1]:
+            target_year = years[-1]
+
+        self.combo_year.blockSignals(True)
+        self.combo_year.clear()
+        for y in years:
+            self.combo_year.addItem(str(y), y)
+
+        idx = self.combo_year.findData(target_year)
+        if idx >= 0:
+            self.combo_year.setCurrentIndex(idx)
+        self.combo_year.blockSignals(False)
+
+    def _ensure_year_available(self, year: int) -> int:
+        idx = self.combo_year.findData(year)
+        if idx >= 0:
+            return idx
+
+        self._set_year_window(year, year)
+        return self.combo_year.findData(year)
+
+    def _shift_year_window_by_steps(self, steps: int):
+        if steps == 0:
+            return
+
+        center_idx = min(5, max(0, self.combo_year.count() - 1))
+        center_year = self.combo_year.itemData(center_idx)
+        if not isinstance(center_year, int):
+            center_year = self.yearShown()
+
+        selected_year = self.combo_year.currentData()
+        if not isinstance(selected_year, int):
+            selected_year = center_year
+
+        self._set_year_window(center_year + steps, selected_year)
+
+    def eventFilter(self, obj, event):
+        if obj in (self.combo_year, self.combo_year.view(), self.combo_year.view().viewport()) and event.type() == QEvent.Wheel:
+            delta = event.angleDelta().y()
+            if delta != 0:
+                steps = int(delta / 120)
+                if steps == 0:
+                    steps = 1 if delta > 0 else -1
+                self._shift_year_window_by_steps(-steps)
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
 
     def _apply_page_from_nav(self):
         year = self.combo_year.currentData()
@@ -194,9 +246,13 @@ class PopupDateEdit(QDateEdit):
 
         if self.lineEdit() is not None:
             self.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.lineEdit().installEventFilter(self)
 
     def mousePressEvent(self, event):
-        # 禁止點擊開啟彈出月曆：保留預設行為（不彈出）
+        if event.button() == Qt.LeftButton:
+            self._show_calendar_popup()
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -205,7 +261,10 @@ class PopupDateEdit(QDateEdit):
         return
 
     def eventFilter(self, obj, event):
-        # 不攔截 lineEdit 的點擊事件，避免開啟月曆彈窗
+        if obj is self.lineEdit() and event.type() == QEvent.MouseButtonPress:
+            self._show_calendar_popup()
+            event.accept()
+            return True
         return super().eventFilter(obj, event)
 
     def _show_calendar_popup(self):
@@ -383,6 +442,10 @@ class RecurrenceDialog(QDialog):
         self.update_duration_combo()
         layout.addWidget(self.duration_combo, 2, 1)
 
+        self.lock_checkbox = QCheckBox("Lock")
+        self.lock_checkbox.setToolTip("勾選後在開始到結束期間持續鎖定 OPC UA Tag 值")
+        layout.addWidget(self.lock_checkbox, 0, 2, 3, 1, alignment=Qt.AlignLeft | Qt.AlignTop)
+
         layout.setColumnStretch(2, 1)
         return group
 
@@ -470,11 +533,16 @@ class RecurrenceDialog(QDialog):
     def set_end_time(self, value: QTime):
         self._set_combo_time(self.end_time_combo, value)
 
+    def get_lock_enabled(self) -> bool:
+        return bool(self.lock_checkbox.isChecked())
+
+    def set_lock_enabled(self, enabled: bool):
+        self.lock_checkbox.setChecked(bool(enabled))
+
     def update_duration_combo(self):
         """更新期間下拉選單"""
         self.duration_combo.clear()
         durations = [
-            ("0 分", 0),
             ("5 分", 5),
             ("10 分", 10),
             ("15 分", 15),
@@ -501,7 +569,7 @@ class RecurrenceDialog(QDialog):
         ]
         for text, minutes in durations:
             self.duration_combo.addItem(text, minutes)
-        self.duration_combo.setCurrentIndex(0)  # 預設為 0 分
+        self.duration_combo.setCurrentIndex(0)  # 預設為 5 分
 
     def connect_signals(self):
         """連接信號"""

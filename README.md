@@ -9,17 +9,18 @@
 ![OPC UA 瀏覽頁](image/opc_browser.png)
 ![資料庫結構](image/db_structure.png)
 
-CalendarUA 是一套以 `PySide6` 開發的 OPC UA 排程桌面工具，提供日/週/月行事曆視圖、RRULE 週期排程、例外與假日規則、以及 SQLite 本地資料庫。
+CalendarUA 是以 `PySide6` 開發的 OPC UA 排程桌面工具，提供日/週/月視圖、RRULE 週期排程、例外與假日規則、以及 SQLite 專案資料庫。
 
-## 核心功能
+## 主要功能
 
-- 日 / 週 / 月視圖（含拖曳/右鍵互動）
+- 日 / 週 / 月視圖與右鍵操作
+- 日視圖 / 週視圖左側時間軸支援 Time Scale 切換（`5 / 6 / 10 / 15 / 30 / 60 min`）
+- Time Scale 設定寫入資料庫（`general_settings.time_scale_minutes`），下次開啟專案會保留
 - RRULE 週期排程（含 `DURATION`）
 - 排程例外（取消或覆寫單次 occurrence）
 - 假日規則（每週假日 + 國曆/農曆月日）
-- 假日設定匯入/匯出（CSV）
-- OPC UA 連線與寫值（含安全模式/帳密）
-- 排程項目 `忽略假日` 開關
+- OPC UA 連線與寫值（安全模式、帳密、逾時）
+- 排程 `忽略假日` 開關
 
 ## 專案結構
 
@@ -40,8 +41,8 @@ CalendarUA/
 │  ├─ month_grid.py
 │  ├─ recurrence_dialog.py
 │  └─ schedule_canvas.py
-├─ docs/
-│  └─ db_schema.md
+├─ db_schema.md
+├─ rrule.md
 ├─ requirements.txt
 ├─ pyproject.toml
 ├─ CalendarUA-onedir.spec
@@ -52,34 +53,54 @@ CalendarUA/
 
 - Python `>= 3.10`
 - 建議使用 `uv`
-- Windows 11（主要開發/測試環境）
+- Windows（目前主要開發/測試環境）
 
 ## 安裝與執行
 
-### 1) 使用 uv（建議）
+### 使用 uv（建議）
 
 ```bash
 uv sync --dev
 uv run python CalendarUA.py
 ```
 
-### 2) 使用 pip
+### 使用 pip
 
 ```bash
 pip install -r requirements.txt
 python CalendarUA.py
 ```
 
-## 假日設定說明
+## 行事曆視圖補充
 
-主視窗右上「日 / 週 / 月 / 假日」中的 `假日` 按鈕可開啟假日設定。
+### Time Scale（新增）
 
-- 每週假日：週一到週日 checkbox（勾選即自動存入 DB）
-- 日期假日：表格右鍵選單新增 / 編輯 / 刪除
-- 日期型規則支援：
+- 在日視圖或週視圖，對左側時間軸（垂直時間欄）按右鍵
+- 可選：`5min`、`6min`、`10min`、`15min`、`30min`、`60min`
+- 設定後會立即重繪時間刻度
+- 日/週視圖會同步刻度
+- 刻度會保存到資料庫，重啟或重開專案後維持原設定
+
+### 右鍵新增/編輯的時間精度
+
+- 右鍵時間格新增/編輯時，會帶入「小時 + 分鐘」預設值
+- 分鐘值會跟隨目前 Time Scale（例如 15 分刻度可帶入 `08:15`）
+
+## 排程設定頁變更
+
+- 「排程時間 → 期間」下拉選單已移除 `0 分`
+- 目前最短期間為 `5 分`
+
+## 假日設定
+
+主視窗右上 `假日` 按鈕可開啟假日設定。
+
+- 每週假日：週一到週日 checkbox
+- 日期假日：表格右鍵新增 / 編輯 / 刪除
+- 日期型規則：
   - 國曆（月/日）
   - 農曆（月/日）
-- CSV 匯入/匯出格式欄位：
+- CSV 匯入/匯出欄位：
   - `entry_type,calendar_type,month,day,weekday`
 
 ## 資料庫
@@ -92,7 +113,7 @@ python CalendarUA.py
   - `general_settings`
   - `runtime_override`
 
-詳細請見：`docs/db_schema.md`
+詳細請見 `db_schema.md`。
 
 ## 打包（PyInstaller）
 
@@ -112,17 +133,17 @@ uv run pyinstaller --clean --noconfirm CalendarUA-onefile.spec
 
 輸出檔案：`dist/CalendarUA-onefile.exe`
 
-## 常見開發指令
+## 常用開發指令
 
 ```bash
 # 語法檢查
 uv run python -m py_compile CalendarUA.py core/*.py database/*.py ui/*.py
 
-# 重新安裝依賴
+# 更新依賴
 uv sync --dev
 ```
 
-## 備註
+## 相關文件
 
-- 行事曆的假日命中邏輯由 `core/schedule_resolver.py` 負責。
-- 若排程勾選 `忽略假日`，該排程 occurrence 不套用假日覆寫。
+- RRULE 說明：`rrule.md`
+- 資料庫結構：`db_schema.md`

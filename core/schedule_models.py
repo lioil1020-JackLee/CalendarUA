@@ -50,6 +50,7 @@ class ScheduleSeries:
     target_value: str
     data_type: str
     rrule_str: str
+    lock_enabled: bool
     is_enabled: bool
 
     # OPC UA 連線 / 安全設定

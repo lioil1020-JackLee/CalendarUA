@@ -1,214 +1,168 @@
-## CalendarUA 資料庫結構說明（SQLite）
+## CalendarUA 資料庫結構（SQLite）
 
-資料庫檔案預設為 `database/calendarua.db`。  
-本文件描述主要資料表的結構與用途，方便你之後維護或擴充（例如新增欄位、寫報表、外部系統整合）。
+預設資料庫檔案：`database/calendarua.db`
 
----
-
-### 1. `schedules` 表 - 排程系列（含 OPC UA 寫值設定）
-
-**用途**：一列代表一條排程「系列」：  
-何時（RRULE）、對哪台 OPC UA Server、寫什麼值到哪個 NodeId。
-
-**主要欄位**
-
-- `id INTEGER PRIMARY KEY AUTOINCREMENT`  
-  排程 ID。
-- `task_name TEXT NOT NULL`  
-  排程名稱（顯示在行事曆上的標題）。
-- `opc_url TEXT NOT NULL`  
-  OPC UA 伺服器 URL（例如 `opc.tcp://localhost:4840`）。
-- `node_id TEXT NOT NULL`  
-  要寫值的 NodeId（如 `ns=2;i=1001` 或 `ns=2;s=TagName`）。
-- `target_value TEXT NOT NULL`  
-  寫入的目標值（以文字儲存，實際寫值時再轉型）。
-- `data_type TEXT DEFAULT 'auto'`  
-  目標值型別：
-  - `auto` / `int` / `float` / `string` / `bool`
-- `rrule_str TEXT NOT NULL`  
-  RRULE 字串，描述重複規則（FREQ, BYHOUR, BYMINUTE, BYDAY...）。
-- `opc_security_policy TEXT DEFAULT 'None'`  
-  OPC UA 安全策略。
-- `opc_security_mode TEXT DEFAULT 'None'`  
-  安全模式（None / Sign / SignAndEncrypt）。
-- `opc_username TEXT DEFAULT ''` / `opc_password TEXT DEFAULT ''`  
-  OPC UA 使用者／密碼。
-- `opc_timeout INTEGER DEFAULT 10`  
-  連線超時秒數。
-- `opc_write_timeout INTEGER DEFAULT 3`  
-  寫值重試延遲秒數。
-- `is_enabled INTEGER DEFAULT 1`  
-  是否啟用（1=啟用, 0=停用）。
-- `ignore_holiday INTEGER DEFAULT 0`  
-  是否忽略假日規則（1=忽略, 0=套用假日規則）。
-- `category_id INTEGER DEFAULT 1`  
-  類別顏色 ID（對應 `schedule_categories.id`）。
-- `priority INTEGER DEFAULT 1`  
-  優先權（暫未大量使用，可做排序或權重）。
-- `location TEXT DEFAULT ''` / `description TEXT DEFAULT ''`  
-  類似 Outlook 的地點與描述欄位。
-- `last_execution_status TEXT` / `last_execution_time TIMESTAMP`  
-  最近一次執行結果與時間。
-- `next_execution_time TIMESTAMP`  
-  預先計算出的下一次觸發時間（可選，用於加速查詢）。
-- `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`  
-  建立時間。
-- `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`  
-  最近更新時間。
-
-**索引**
-
-- `idx_schedules_enabled`：`(is_enabled)`
-- `idx_schedules_node_id`：`(node_id)`
-- `idx_schedules_category`：`(category_id)`
-- `idx_schedules_next_time`：`(next_execution_time)`，優化依「下一次執行時間」掃描排程的查詢效能
+本文件描述目前主要資料表、重要欄位，以及與 UI 行為的對應關係。
 
 ---
 
-### 2. `schedule_exceptions` 表 - 排程例外
+### 1) schedules（排程主表）
 
-**用途**：管理每一條排程在「某個日期」上的例外行為：
+一筆代表一條排程系列。
 
-- `action = 'cancel'`：取消這一天的 occurrence。
-- `action = 'override'`：覆寫這一天的時間 / 標題 / 目標值 / 類別。
-
-**主要欄位**
+主要欄位：
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `schedule_id INTEGER NOT NULL`  
-  對應 `schedules.id`，`ON DELETE CASCADE`。
-- `occurrence_date TEXT NOT NULL`  
-  例外發生日（格式：`YYYY-MM-DD`）。
-- `action TEXT NOT NULL DEFAULT 'override'`  
-  `"cancel"` 或 `"override"`。
-- `override_start TEXT` / `override_end TEXT`  
-  覆寫後的開始 / 結束時間（ISO 8601 字串）。  
-  只有 `action='override'` 時有效。
-- `override_task_name TEXT`  
-  覆寫後的標題（若為空則沿用原本 `task_name`）。
-- `override_target_value TEXT`  
-  覆寫後的目標值。
-- `override_category_id INTEGER`  
-  覆寫後的 Category 顏色 ID。
-- `note TEXT DEFAULT ''`  
-  備註說明。
+- `task_name TEXT NOT NULL`
+- `opc_url TEXT NOT NULL`
+- `node_id TEXT NOT NULL`
+- `target_value TEXT NOT NULL`
+- `data_type TEXT DEFAULT 'auto'`
+- `rrule_str TEXT NOT NULL`
+- `opc_security_policy TEXT DEFAULT 'None'`
+- `opc_security_mode TEXT DEFAULT 'None'`
+- `opc_username TEXT DEFAULT ''`
+- `opc_password TEXT DEFAULT ''`
+- `opc_timeout INTEGER DEFAULT 5`
+- `opc_write_timeout INTEGER DEFAULT 3`
+- `lock_enabled INTEGER DEFAULT 0`
+- `is_enabled INTEGER DEFAULT 1`
+- `ignore_holiday INTEGER DEFAULT 0`
+- `category_id INTEGER DEFAULT 1`
+- `priority INTEGER DEFAULT 1`
+- `location TEXT DEFAULT ''`
+- `description TEXT DEFAULT ''`
+- `last_execution_status TEXT`
+- `last_execution_time TIMESTAMP`
+- `next_execution_time TIMESTAMP`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
-**索引**
+常用索引：
 
-- `idx_schedule_exceptions_schedule_date (schedule_id, occurrence_date)`
-- `idx_exceptions_category (override_category_id)`
+- `idx_schedules_enabled (is_enabled)`
+- `idx_schedules_node_id (node_id)`
+- `idx_schedules_next_time (next_execution_time)`
 
 ---
 
-### 3. `holidays` 表 - 假日規則（單表整合）
+### 2) schedule_exceptions（單次例外）
 
-**用途**：整合「每週假日（週一~週日）」與「國曆/農曆固定月日」設定。  
-目前假日設定頁僅使用此表，不再依賴 `holiday_calendars` / `holiday_entries`。
+用於覆寫或取消特定日期 occurrence。
 
-**主要欄位**
+主要欄位：
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `entry_type TEXT NOT NULL`  
-  規則型態：`weekday` 或 `date`。
-- `calendar_type TEXT`  
-  只有 `entry_type='date'` 會使用，值為 `solar`（國曆）或 `lunar`（農曆）。
-- `month INTEGER` / `day INTEGER`  
-  日期型規則用的月/日。
-- `weekday INTEGER`  
-  每週規則用（1=週一 ... 7=週日）。
-- `name TEXT DEFAULT ''`  
-  顯示名稱（可空）。
-- `override_target_value TEXT`  
-  可選：若命中假日可覆寫排程目標值。
+- `schedule_id INTEGER NOT NULL`（FK -> `schedules.id`，`ON DELETE CASCADE`）
+- `occurrence_date TEXT NOT NULL`（`YYYY-MM-DD`）
+- `action TEXT NOT NULL DEFAULT 'override'`（`cancel` / `override`）
+- `override_start TEXT`
+- `override_end TEXT`
+- `override_task_name TEXT`
+- `override_target_value TEXT`
+- `override_category_id INTEGER`
+- `note TEXT DEFAULT ''`
+- `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+- `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+
+常用索引：
+
+- `idx_schedule_exceptions_schedule_date (schedule_id, occurrence_date)`
+
+---
+
+### 3) holidays（假日規則單表）
+
+整合每週假日與固定月日假日。
+
+主要欄位：
+
+- `id INTEGER PRIMARY KEY AUTOINCREMENT`
+- `entry_type TEXT NOT NULL`（`weekday` / `date`）
+- `calendar_type TEXT`（`solar` / `lunar`，僅 `date` 使用）
+- `month INTEGER`
+- `day INTEGER`
+- `weekday INTEGER`（1=週一 ... 7=週日）
+- `name TEXT DEFAULT ''`
+- `override_target_value TEXT`
 - `is_enabled INTEGER DEFAULT 1`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
-**索引**
-
-- `idx_holidays_unique_weekday`：`entry_type='weekday'` 下 `weekday` 唯一
-- `idx_holidays_unique_date`：`entry_type='date'` 下 `(calendar_type, month, day)` 唯一
-- `idx_holidays_enabled`：`(is_enabled)`
-
 ---
 
-### 5. `schedule_categories` 表 - 類別顏色
+### 4) schedule_categories（分類顏色）
 
-**用途**：類似 Outlook 的分類顏色，主要用於排程與假日的視覺標示。
+提供排程顯示的分類與顏色配置。
 
-**主要欄位**
+主要欄位：
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `name TEXT UNIQUE NOT NULL`  
-  類別名稱（例如：`Red (關閉)`、`Pink (自動)`）。
-- `bg_color TEXT NOT NULL`  
-  背景色（Hex，如 `#FF0000`）。
-- `fg_color TEXT NOT NULL`  
-  前景色（文字顏色）。
-- `sort_order INTEGER DEFAULT 0`  
-  排序用。
-- `is_system INTEGER DEFAULT 0`  
-  是否為系統預設類別（不可刪除）。
+- `name TEXT UNIQUE NOT NULL`
+- `bg_color TEXT NOT NULL`
+- `fg_color TEXT NOT NULL`
+- `sort_order INTEGER DEFAULT 0`
+- `is_system INTEGER DEFAULT 0`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
 ---
 
-### 6. `general_settings` 表 - 全域設定 / Profile
+### 5) general_settings（全域設定）
 
-**用途**：一般只會有一筆，描述系統層級設定與 Profile。
+通常只有一筆，用於保存 UI/系統層級設定。
 
-**主要欄位**
+主要欄位：
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
 - `profile_name TEXT DEFAULT '預設 Profile'`
 - `description TEXT`
-- `enable_schedule INTEGER DEFAULT 1`  
-  是否啟用排程執行緒。
-- `scan_rate INTEGER DEFAULT 1`  
-  排程掃描間隔（秒）。
-- `refresh_rate INTEGER DEFAULT 5`  
-  UI 資料更新頻率（秒）。
-- `use_active_period INTEGER DEFAULT 0`  
-  是否限制排程只在某段期間有效。
-- `active_from TEXT` / `active_to TEXT`  
-  有效期間（ISO 8601 字串）。
-- `output_type TEXT DEFAULT 'OPC UA Write'`  
-  預設輸出類型。
+- `enable_schedule INTEGER DEFAULT 1`
+- `scan_rate INTEGER DEFAULT 1`
+- `refresh_rate INTEGER DEFAULT 5`
+- `use_active_period INTEGER DEFAULT 0`
+- `active_from TEXT`
+- `active_to TEXT`
+- `output_type TEXT DEFAULT 'OPC UA Write'`
 - `refresh_output INTEGER DEFAULT 1`
 - `generate_events INTEGER DEFAULT 1`
+- `last_opc_url TEXT DEFAULT ''`
+- `last_opc_security_policy TEXT DEFAULT 'None'`
+- `last_opc_security_mode TEXT DEFAULT 'None'`
+- `last_opc_username TEXT DEFAULT ''`
+- `last_opc_password TEXT DEFAULT ''`
+- `last_opc_timeout INTEGER DEFAULT 5`
+- `last_opc_write_timeout INTEGER DEFAULT 3`
+- `time_scale_minutes INTEGER DEFAULT 60`  ← 新增
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
+`time_scale_minutes` 用途：
+
+- 保存日/週視圖左側時間軸的 Time Scale 設定
+- 允許值：`5, 6, 10, 15, 30, 60`
+- 啟動或切換專案資料庫時會載入並套用
+
 ---
 
-### 7. `runtime_override` 表 - Runtime 覆寫
+### 6) runtime_override（執行期覆寫）
 
-**用途**：儲存目前生效中的 Runtime Override（最多一筆）。
+保存目前生效中的 runtime override。
 
-**主要欄位**
+主要欄位：
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `override_value TEXT NOT NULL`  
-  覆寫輸出的值（字串，實際使用時再轉型）。
-- `override_until TEXT`  
-  覆寫有效期限（ISO 8601 字串），為 `NULL` 表示永久，需手動清除。
+- `override_value TEXT NOT NULL`
+- `override_until TEXT`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
 ---
 
-### 遷移與版本相容性
+## 遷移策略
 
-`database/sqlite_manager.py` 中的 `_migrate_db()` 會在啟動時自動：
+`database/sqlite_manager.py` 的 `_migrate_db()` 會在啟動時自動補齊缺欄位與缺表。
 
-- 檢查並補上新欄位（例如 security / category / description 等）。
-- 建立缺少的表與索引。
+本次更新已納入：
 
-因此：
-
-- **直接升級程式碼**：舊版 DB 仍可被自動「遷移」到最新結構。
-- 若你自行修改 Schema，建議同步更新 `_migrate_db()`，或建立新的遷移函式。
-
+- 若 `general_settings` 缺少 `time_scale_minutes`，會自動 `ALTER TABLE` 補上（預設 `60`）。

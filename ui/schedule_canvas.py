@@ -27,23 +27,29 @@ def _week_start_sunday(reference_date: QDate) -> QDate:
 
 class ScheduleTimeGridWidget(QWidget):
     context_action_requested = Signal(str, dict)
+    time_scale_changed = Signal(int)
+    TIME_SCALE_OPTIONS = (5, 6, 10, 15, 30, 60)
 
     def __init__(self, week_mode: bool, parent=None):
         super().__init__(parent)
         self.week_mode = week_mode
+        self.time_scale_minutes = 60
         self.reference_date = QDate.currentDate()
         self.occurrences: List[ResolvedOccurrence] = []
         self._cell_occurrence_map: dict[tuple[int, int], List[ResolvedOccurrence]] = {}
         self._cell_start_titles: dict[tuple[int, int], List[str]] = {}
 
-        self.table = QTableWidget(24, 7 if week_mode else 1)
+        self.table = QTableWidget(self._rows_per_day(), 7 if week_mode else 1)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.NoSelection)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         # 支援滑鼠左鍵雙擊：直接開啟編輯 / 新增視窗
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.verticalHeader().customContextMenuRequested.connect(self._show_time_scale_menu)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setFixedHeight(32)
         self.table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
@@ -56,8 +62,7 @@ class ScheduleTimeGridWidget(QWidget):
         header_font.setBold(True)
         self.table.horizontalHeader().setFont(header_font)
 
-        for row in range(24):
-            self.table.setVerticalHeaderItem(row, QTableWidgetItem(_hour_label(row)))
+        self._refresh_time_labels()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -65,6 +70,37 @@ class ScheduleTimeGridWidget(QWidget):
 
         self._refresh_headers()
         self._ensure_items()
+
+    def _rows_per_day(self) -> int:
+        return (24 * 60) // self.time_scale_minutes
+
+    def _row_to_hour_minute(self, row: int) -> tuple[int, int]:
+        total_minutes = row * self.time_scale_minutes
+        return total_minutes // 60, total_minutes % 60
+
+    def _minute_of_day_to_row(self, minute_of_day: int) -> int:
+        minute_of_day = max(0, min((24 * 60) - 1, minute_of_day))
+        return minute_of_day // self.time_scale_minutes
+
+    def _refresh_time_labels(self):
+        for row in range(self.table.rowCount()):
+            hour, minute = self._row_to_hour_minute(row)
+            if minute == 0:
+                label = _hour_label(hour)
+            else:
+                label = f"{hour:02d}:{minute:02d}"
+            self.table.setVerticalHeaderItem(row, QTableWidgetItem(label))
+
+    def set_time_scale(self, minutes: int):
+        if minutes not in self.TIME_SCALE_OPTIONS or minutes == self.time_scale_minutes:
+            return
+
+        self.time_scale_minutes = minutes
+        self.table.setRowCount(self._rows_per_day())
+        self._refresh_time_labels()
+        self._ensure_items()
+        self._render()
+        self.time_scale_changed.emit(minutes)
 
     def set_reference_date(self, qdate: QDate):
         self.reference_date = qdate
@@ -88,6 +124,23 @@ class ScheduleTimeGridWidget(QWidget):
             day = sunday.addDays(offset)
             labels.append(f"{day_names[offset]} {day.day()}")
         self.table.setHorizontalHeaderLabels(labels)
+
+    def _show_time_scale_menu(self, position):
+        header = self.table.verticalHeader()
+        if header.logicalIndexAt(position) < 0:
+            return
+
+        menu = QMenu(self)
+        actions = {}
+        for minutes in self.TIME_SCALE_OPTIONS:
+            action = menu.addAction(f"{minutes}min")
+            action.setCheckable(True)
+            action.setChecked(minutes == self.time_scale_minutes)
+            actions[action] = minutes
+
+        selected = menu.exec(header.mapToGlobal(position))
+        if selected in actions:
+            self.set_time_scale(actions[selected])
 
     def _ensure_items(self):
         for row in range(self.table.rowCount()):
@@ -126,12 +179,17 @@ class ScheduleTimeGridWidget(QWidget):
         if col < 0 or col >= self.table.columnCount():
             return
 
-        start_row = max(0, start.hour)
-        if end.minute == 0 and end.second == 0:
-            end_row = max(start_row, end.hour - 1)
-        else:
-            end_row = max(start_row, end.hour)
-        end_row = min(23, end_row)
+        start_minute_of_day = (start.hour * 60) + start.minute
+        end_minute_of_day = (end.hour * 60) + end.minute
+        if end.second > 0 or end.microsecond > 0:
+            end_minute_of_day += 1
+
+        if end_minute_of_day <= start_minute_of_day:
+            end_minute_of_day = start_minute_of_day + self.time_scale_minutes
+
+        start_row = self._minute_of_day_to_row(start_minute_of_day)
+        end_row = self._minute_of_day_to_row(end_minute_of_day - 1)
+        end_row = min(self.table.rowCount() - 1, max(start_row, end_row))
 
         for row in range(start_row, end_row + 1):
             item = self.table.item(row, col)
@@ -230,7 +288,8 @@ class ScheduleTimeGridWidget(QWidget):
         payload = {
             "schedule_id": schedule_id,
             "date": date_text,
-            "hour": row,
+            "hour": self._row_to_hour_minute(row)[0],
+            "minute": self._row_to_hour_minute(row)[1],
             "week_mode": self.week_mode,
         }
 
@@ -282,7 +341,8 @@ class ScheduleTimeGridWidget(QWidget):
         payload = {
             "schedule_id": schedule_id,
             "date": date_text,
-            "hour": row,
+            "hour": self._row_to_hour_minute(row)[0],
+            "minute": self._row_to_hour_minute(row)[1],
             "week_mode": self.week_mode,
         }
 
