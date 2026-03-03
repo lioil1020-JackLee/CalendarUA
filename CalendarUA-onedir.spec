@@ -1,30 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-import sys
 
-# 資源清單：包含圖示檔案
-datas_list = []
+datas = []
+icon = None
 
-# 根據平台設定應用程式名稱
-app_name = 'CalendarUA-macos' if sys.platform == 'darwin' else 'CalendarUA-onedir'
-
-# 動態檢查圖示檔案並設定參數
-icon_param = None
-if sys.platform == 'darwin':  # macOS
-    if os.path.exists('lioil.icns'):
-        datas_list.append(('lioil.icns', '.'))
-        icon_param = 'lioil.icns'
-elif os.name == 'nt':  # Windows
-    if os.path.exists('lioil.ico'):
-        datas_list.append(('lioil.ico', '.'))
-        icon_param = 'lioil.ico'
+if os.name == "nt" and os.path.exists("lioil.ico"):
+    datas.append(("lioil.ico", "."))
+    icon = "lioil.ico"
+elif os.path.exists("lioil.icns"):
+    datas.append(("lioil.icns", "."))
+    icon = "lioil.icns"
 
 a = Analysis(
-    ['CalendarUA.py'],
+    ["CalendarUA.py"],
     pathex=[],
     binaries=[],
-    datas=datas_list,
-    hiddenimports=['PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets', 'qasync'],
+    datas=datas,
+    hiddenimports=[
+        "PySide6.QtCore",
+        "PySide6.QtGui",
+        "PySide6.QtWidgets",
+        "qasync",
+        "dateutil.rrule",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -39,7 +37,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=app_name,
+    name="CalendarUA-onedir",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -52,7 +50,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=icon_param, # 使用修正後的圖示變數
+    icon=icon,
 )
 
 coll = COLLECT(
@@ -63,5 +61,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name=app_name, # 這將決定 dist 底下生成的資料夾名稱
+    name="CalendarUA-onedir",
 )

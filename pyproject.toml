@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "CalendarUA"
-version = "1.0.0"
-description = "工業自動化排程管理系統"
+version = "2.3.0"
+description = "CalendarUA - OPC UA schedule desktop application"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

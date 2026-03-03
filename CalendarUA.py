@@ -6,7 +6,7 @@ CalendarUA - 工業自動化排程管理系統主程式
 
 import sys
 import asyncio
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 import logging
 
@@ -24,24 +24,19 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
-    QSplitter,
     QCalendarWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QPushButton,
     QLabel,
     QLineEdit,
     QInputDialog,
     QGroupBox,
     QMessageBox,
-    QHeaderView,
     QMenu,
     QSystemTrayIcon,
     QStyle,
     QDialog,
     QComboBox,
     QSpinBox,
-    QTextEdit,
     QStatusBar,
     QToolBar,
     QTreeWidget,
@@ -49,15 +44,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QTreeWidgetItem,
-    QTabWidget,
     QStackedWidget,
-    QDateEdit,
     QToolButton,
-    QTableView,
-    QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QEvent, QLocale, QTime
-from PySide6.QtGui import QAction, QColor, QIcon, QTextCharFormat
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QLocale, QTime
+from PySide6.QtGui import QAction, QIcon
 import qasync
 import re
 
@@ -2665,12 +2656,8 @@ class OPCNodeBrowserDialog(QDialog):
 
     def _async_connect_and_load(self):
         """異步連線和載入"""
-        import asyncio
-
         async def do_connect():
             try:
-                from core.opc_handler import OPCHandler
-
                 self.opc_handler = OPCHandler(self.opc_url)
 
                 # 連線到 OPC UA 伺服器
