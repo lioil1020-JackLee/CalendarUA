@@ -6,6 +6,7 @@ CalendarUA - 工業自動化排程管理系統主程式
 
 import sys
 import asyncio
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 import logging
@@ -47,10 +48,11 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QToolButton,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QLocale, QTime
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QLocale, QTime, QEvent
+from PySide6.QtGui import QAction, QIcon, QFont
 import qasync
 import re
+from datetime import date as dt_date
 
 from database.sqlite_manager import SQLiteManager
 from core.opc_handler import OPCHandler
@@ -60,6 +62,44 @@ from ui.recurrence_dialog import RecurrenceDialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
 from ui.schedule_canvas import DayViewWidget, WeekViewWidget
 from ui.month_grid import MonthViewWidget
+from core.lunar_calendar import to_lunar, LunarDateInfo
+
+
+def _format_lunar_day_text(info: LunarDateInfo) -> str:
+    """將農曆日轉為中文（初一、十五、三十）。"""
+    n = info.lunar_day
+    if n <= 0 or n > 30:
+        return ""
+
+    if n == 1:
+        month_names = {
+            1: "元",
+            2: "二",
+            3: "三",
+            4: "四",
+            5: "五",
+            6: "六",
+            7: "七",
+            8: "八",
+            9: "九",
+            10: "十",
+            11: "十一",
+            12: "十二",
+        }
+        month_text = month_names.get(info.lunar_month, str(info.lunar_month))
+        leap_prefix = "閏" if info.is_leap_month else ""
+        return f"{leap_prefix}{month_text}月"
+
+    if n == 10:
+        return "初十"
+    if n == 20:
+        return "二十"
+    if n == 30:
+        return "三十"
+
+    chinese_ten = ["初", "十", "廿", "卅"]
+    numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+    return f"{chinese_ten[(n - 1) // 10]}{numerals[(n - 1) % 10]}"
 
 
 def get_app_icon():
@@ -103,6 +143,14 @@ class NavCalendarWidget(QCalendarWidget):
         # 使用 Qt 內建 clicked(QDate) 訊號，不再自己做 hit-test
         self.clicked.connect(self._on_qt_clicked)
 
+        # 延遲安裝事件過濾器，阻擋內部子元件（表格）滾輪切月
+        QTimer.singleShot(0, self._install_wheel_blockers)
+
+    def _install_wheel_blockers(self):
+        self.installEventFilter(self)
+        for child in self.findChildren(QWidget):
+            child.installEventFilter(self)
+
     def set_forced_selected_date(self, date: QDate):
         """由外部設定目前選取日期（兩個小月曆共用同一個選取日期）"""
         self._forced_selected_date = date
@@ -135,6 +183,17 @@ class NavCalendarWidget(QCalendarWidget):
         self.update()
         self.date_clicked.emit(clicked)
 
+    def wheelEvent(self, event):
+        """停用滑鼠滾輪切換月份。"""
+        event.accept()
+        return
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel:
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
     def paintCell(self, painter, rect, date):
         shown_year = self.yearShown()
         shown_month = self.monthShown()
@@ -159,14 +218,40 @@ class NavCalendarWidget(QCalendarWidget):
 
         from PySide6.QtGui import QColor
 
+        lunar_text = ""
+        try:
+            lunar_info = to_lunar(dt_date(date.year(), date.month(), date.day()))
+            if lunar_info:
+                lunar_text = _format_lunar_day_text(lunar_info)
+        except Exception:
+            lunar_text = ""
+
         if not hide:
             # 本月白字、前後月灰字
             if is_this:
                 fg = QColor("#f0f0f0")
             else:
                 fg = QColor("#808080")
+
+            # 上方：國曆（較大）
             painter.setPen(fg)
-            painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+            solar_font = QFont(painter.font())
+            solar_font.setFamily("Segoe UI")
+            solar_font.setBold(True)
+            solar_font.setPointSize(13)
+            painter.setFont(solar_font)
+            top_rect = rect.adjusted(0, 1, 0, -rect.height() // 2)
+            painter.drawText(top_rect, Qt.AlignHCenter | Qt.AlignVCenter, str(date.day()))
+
+            # 下方：農曆（國字）
+            if lunar_text:
+                lunar_font = QFont(painter.font())
+                lunar_font.setFamily("Microsoft JhengHei")
+                lunar_font.setBold(False)
+                lunar_font.setPointSize(9)
+                painter.setFont(lunar_font)
+                bottom_rect = rect.adjusted(0, rect.height() // 2 - 1, 0, 0)
+                painter.drawText(bottom_rect, Qt.AlignHCenter | Qt.AlignVCenter, lunar_text)
 
             # 今日標記（左側小月曆永久保留一個 today 高亮）
             if date == QDate.currentDate():
@@ -184,7 +269,23 @@ class NavCalendarWidget(QCalendarWidget):
             r = rect.adjusted(2, 2, -2, -2)
             painter.drawRect(r)
             painter.setPen(QColor("#ffffff"))
-            painter.drawText(rect, Qt.AlignCenter, str(date.day()))
+
+            solar_font = QFont(painter.font())
+            solar_font.setFamily("Segoe UI")
+            solar_font.setBold(True)
+            solar_font.setPointSize(13)
+            painter.setFont(solar_font)
+            top_rect = rect.adjusted(0, 1, 0, -rect.height() // 2)
+            painter.drawText(top_rect, Qt.AlignHCenter | Qt.AlignVCenter, str(date.day()))
+
+            if lunar_text:
+                lunar_font = QFont(painter.font())
+                lunar_font.setFamily("Microsoft JhengHei")
+                lunar_font.setBold(False)
+                lunar_font.setPointSize(9)
+                painter.setFont(lunar_font)
+                bottom_rect = rect.adjusted(0, rect.height() // 2 - 1, 0, 0)
+                painter.drawText(bottom_rect, Qt.AlignHCenter | Qt.AlignVCenter, lunar_text)
 
         painter.restore()
 
@@ -333,32 +434,51 @@ class CalendarUA(QMainWindow):
         left_layout.setSpacing(0)
 
         # 導覽月份標頭：上一月 / 月份下拉 / 年份下拉 / 下一月
-        header_layout = QHBoxLayout()
-        # 略留左右 2px，移除額外間距，讓整排元素緊湊
+        header_layout = QGridLayout()
+        # 略留左右 2px，維持整體緊湊
         header_layout.setContentsMargins(2, 0, 2, 0)
-        header_layout.setSpacing(0)
+        header_layout.setHorizontalSpacing(2)
+        header_layout.setVerticalSpacing(0)
 
         # 使用與 QCalendarWidget 導覽列相似的 QToolButton 圖示，但放大圖示尺寸，增加點擊區
         self.btn_nav_prev = QToolButton()
         self.btn_nav_prev.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
         self.btn_nav_prev.setAutoRaise(True)
-        self.btn_nav_prev.setIconSize(QSize(18, 18))
-        # 稍微縮窄，避免與「今日」與年份重疊
-        self.btn_nav_prev.setFixedWidth(26)
+        self.btn_nav_prev.setIconSize(QSize(22, 22))
+        self.btn_nav_prev.setFixedSize(34, 30)
 
         self.btn_nav_next = QToolButton()
         self.btn_nav_next.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
         self.btn_nav_next.setAutoRaise(True)
-        self.btn_nav_next.setIconSize(QSize(18, 18))
-        self.btn_nav_next.setFixedWidth(26)
+        self.btn_nav_next.setIconSize(QSize(22, 22))
+        self.btn_nav_next.setFixedSize(34, 30)
 
         self.combo_nav_month = QComboBox()
         self.combo_nav_year = QComboBox()
-        # 稍微縮短下拉寬度，避免與右側箭頭重疊，並統一字體大小
-        self.combo_nav_month.setFixedWidth(60)
-        # 年度需要完整顯示四位數，略放寬寬度，但避免與「今日」重疊
-        self.combo_nav_year.setFixedWidth(72)
-        common_combo_style = "font-family: 'Segoe UI'; font-size: 16px;"
+        # 下拉箭頭隱藏後，可用較緊湊寬度並避免與右箭頭重疊
+        self.combo_nav_month.setFixedWidth(64)
+        # 年度需要完整顯示四位數
+        self.combo_nav_year.setFixedWidth(60)
+        common_combo_style = """
+            QComboBox {
+                font-family: 'Segoe UI';
+                font-size: 16px;
+                padding-right: 2px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 0px;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+        """
         self.combo_nav_month.setStyleSheet(common_combo_style)
         self.combo_nav_year.setStyleSheet(common_combo_style)
 
@@ -366,17 +486,30 @@ class CalendarUA(QMainWindow):
         self.btn_nav_today = QToolButton()
         self.btn_nav_today.setText("●")
         self.btn_nav_today.setAutoRaise(True)
-        self.btn_nav_today.setFixedSize(22, 22)
+        self.btn_nav_today.setFixedSize(26, 26)
         self.btn_nav_today.setToolTip("跳到今天")
 
-        # 兩側各加一個 stretch，讓「上一月 2026 今日 3月 下一月」這組元件整體置中
-        header_layout.addStretch()
-        header_layout.addWidget(self.btn_nav_prev)
-        header_layout.addWidget(self.combo_nav_year)
-        header_layout.addWidget(self.btn_nav_today)
-        header_layout.addWidget(self.combo_nav_month)
-        header_layout.addWidget(self.btn_nav_next)
-        header_layout.addStretch()
+        left_cluster = QWidget()
+        left_cluster_layout = QHBoxLayout(left_cluster)
+        left_cluster_layout.setContentsMargins(0, 0, 0, 0)
+        left_cluster_layout.setSpacing(2)
+        left_cluster_layout.addWidget(self.btn_nav_prev)
+        left_cluster_layout.addWidget(self.combo_nav_year)
+
+        right_cluster = QWidget()
+        right_cluster_layout = QHBoxLayout(right_cluster)
+        right_cluster_layout.setContentsMargins(0, 0, 0, 0)
+        right_cluster_layout.setSpacing(2)
+        right_cluster_layout.addWidget(self.combo_nav_month)
+        right_cluster_layout.addWidget(self.btn_nav_next)
+
+        # 以 3 欄對稱配置，讓「今日」固定在月曆正中央
+        header_layout.setColumnStretch(0, 1)
+        header_layout.setColumnStretch(1, 0)
+        header_layout.setColumnStretch(2, 1)
+        header_layout.addWidget(left_cluster, 0, 0, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        header_layout.addWidget(self.btn_nav_today, 0, 1, alignment=Qt.AlignCenter)
+        header_layout.addWidget(right_cluster, 0, 2, alignment=Qt.AlignLeft | Qt.AlignVCenter)
         left_layout.addLayout(header_layout)
 
         # 左上：目前月份導覽月曆
@@ -386,7 +519,7 @@ class CalendarUA(QMainWindow):
         self.nav_calendar.setLocale(QLocale(QLocale.Chinese, QLocale.Taiwan))
         self.nav_calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.nav_calendar.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
-        self.nav_calendar.setFixedWidth(220)
+        self.nav_calendar.setFixedWidth(236)
         # 統一週一~週日表頭底色，與下方預覽一致
         self.nav_calendar.setStyleSheet(
             """
@@ -430,14 +563,14 @@ class CalendarUA(QMainWindow):
         self.nav_calendar_next.setLocale(QLocale(QLocale.Chinese, QLocale.Taiwan))
         self.nav_calendar_next.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.nav_calendar_next.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
-        self.nav_calendar_next.setFixedWidth(220)
+        self.nav_calendar_next.setFixedWidth(236)
         # 保持啟用狀態，才能正確套用每一天的文字格式；不接任何訊號，因此點擊不會影響主程式
         self.nav_calendar_next.setStyleSheet(self.nav_calendar.styleSheet())
         self.nav_calendar_next.setNavigationBarVisible(False)
         left_layout.addWidget(self.nav_calendar_next)
 
         # 讓左側整個區塊寬度與月曆一致，不再比行事曆寬
-        left_widget.setFixedWidth(220)
+        left_widget.setFixedWidth(236)
 
         root_layout.addWidget(left_widget, 0)
 
@@ -540,24 +673,19 @@ class CalendarUA(QMainWindow):
         # File 選單
         file_menu = menubar.addMenu("&File")
         
-        # New Project：建立一個新的 Project（清除目前所有排程資料）
+        # New Project：建立新的資料庫檔（新專案）
         self.action_new_project = QAction("&New Project...", self)
-        self.action_new_project.setStatusTip("建立新的 Project（清除目前排程）")
+        self.action_new_project.setStatusTip("建立新的專案資料庫")
         self.action_new_project.triggered.connect(self.new_project)
         file_menu.addAction(self.action_new_project)
 
         file_menu.addSeparator()
         
-        # Project 設定檔（原 Profile）
-        self.action_load_profile = QAction("&Load Project...", self)
-        self.action_load_profile.setStatusTip("載入 Project 設定檔")
-        self.action_load_profile.triggered.connect(self.load_profile)
-        file_menu.addAction(self.action_load_profile)
-        
-        self.action_save_profile = QAction("&Save Project...", self)
-        self.action_save_profile.setStatusTip("儲存 Project 設定檔")
-        self.action_save_profile.triggered.connect(self.save_profile)
-        file_menu.addAction(self.action_save_profile)
+        # Load Project：開啟另一個資料庫檔
+        self.action_load_project = QAction("&Load Project...", self)
+        self.action_load_project.setStatusTip("開啟既有專案資料庫")
+        self.action_load_project.triggered.connect(self.load_project_database)
+        file_menu.addAction(self.action_load_project)
 
         file_menu.addSeparator()
 
@@ -1497,6 +1625,7 @@ class CalendarUA(QMainWindow):
             until = ""
             bymonth = ""
             bysetpos = ""
+            is_lunar = False
             
             for part in parts:
                 if part.startswith('FREQ='):
@@ -1522,6 +1651,8 @@ class CalendarUA(QMainWindow):
                     bymonth = part.split('=')[1]
                 elif part.startswith('BYSETPOS='):
                     bysetpos = part.split('=')[1]
+                elif part.startswith('X-LUNAR='):
+                    is_lunar = part.split('=')[1] == '1'
             
             # 如果有 COUNT，計算剩餘次數
             if count and schedule_id:
@@ -1659,7 +1790,10 @@ class CalendarUA(QMainWindow):
             if end_desc:
                 desc_parts.append(end_desc)
             
-            return " ".join(desc_parts)
+            description = " ".join(desc_parts)
+            if is_lunar:
+                description = f"[農曆] {description}"
+            return description
             
         except Exception:
             return rrule_str  # 如果解析失敗，返回原始字串
@@ -1942,135 +2076,25 @@ class CalendarUA(QMainWindow):
         self.load_schedules()
         self.status_bar.showMessage("已套用排程變更", 3000)
 
-    def load_profile(self):
-        """載入設定檔"""
+    def load_project_database(self):
+        """開啟既有專案資料庫（.db）。"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "載入 Project 設定檔",
+            "開啟 Project 資料庫",
             "",
-            "JSON Files (*.json);;All Files (*.*)"
+            "SQLite 資料庫 (*.db);;所有檔案 (*)",
         )
-        
-        if not file_path:
-            return
-        
-        try:
-            import json
-            with open(file_path, 'r', encoding='utf-8') as f:
-                profile_data = json.load(f)
-            
-            # 載入 General Settings
-            if 'general_settings' in profile_data and hasattr(self, 'general_panel'):
-                self.general_panel.load_from_dict(profile_data['general_settings'])
 
-            if self.db_manager:
-                # 載入 Schedules
-                schedules = profile_data.get('schedules', [])
-                if schedules:
-                    existing_schedules = self.db_manager.get_all_schedules()
-                    for sch in schedules:
-                        task_name = str(sch.get('task_name', '')).strip()
-                        rrule_str = str(sch.get('rrule_str', '')).strip()
-                        opc_url = str(sch.get('opc_url', '')).strip()
-                        node_id = str(sch.get('node_id', '')).strip()
-                        if not task_name or not rrule_str:
-                            continue
-
-                        matched = next(
-                            (
-                                s for s in existing_schedules
-                                if s.get('task_name') == task_name
-                                and str(s.get('rrule_str', '')).strip() == rrule_str
-                                and str(s.get('opc_url', '')).strip() == opc_url
-                                and str(s.get('node_id', '')).strip() == node_id
-                            ),
-                            None,
-                        )
-
-                        data = {
-                            "task_name": task_name,
-                            "opc_url": opc_url,
-                            "node_id": node_id,
-                            "target_value": str(sch.get('target_value', '')),
-                            "data_type": str(sch.get('data_type', 'auto')),
-                            "rrule_str": rrule_str,
-                            "category_id": 1,
-                            "opc_security_policy": str(sch.get('opc_security_policy', 'None')),
-                            "opc_security_mode": str(sch.get('opc_security_mode', 'None')),
-                            "opc_username": str(sch.get('opc_username', '')),
-                            "opc_password": str(sch.get('opc_password', '')),
-                            "opc_timeout": int(sch.get('opc_timeout', 5) or 5),
-                            "opc_write_timeout": int(sch.get('opc_write_timeout', 3) or 3),
-                            "is_enabled": int(sch.get('is_enabled', 1) or 1),
-                        }
-
-                        if matched:
-                            self.db_manager.update_schedule(matched['id'], **data)
-                        else:
-                            self.db_manager.add_schedule(**data)
-
-                self.load_schedules()
-            
-            QMessageBox.information(self, "成功", f"已載入 Project 設定檔:\n{file_path}")
-            self.status_bar.showMessage(f"已載入 Project: {file_path}", 5000)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "錯誤", f"載入設定檔失敗:\n{str(e)}")
-
-    def save_profile(self):
-        """儲存設定檔"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "儲存 Project 設定檔",
-            "",
-            "JSON Files (*.json);;All Files (*.*)"
-        )
-        
         if not file_path:
             return
 
-        if not file_path.lower().endswith('.json'):
-            file_path = f"{file_path}.json"
-        
-        try:
-            import json
-            profile_data = {}
-            
-            # 儲存 General Settings
-            if hasattr(self, 'general_panel'):
-                profile_data['general_settings'] = self.general_panel.get_current_settings()
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, "檔案不存在", f"找不到資料庫檔案:\n{file_path}")
+            return
 
-            if self.db_manager:
-                schedules = []
-                for s in self.db_manager.get_all_schedules():
-                    schedules.append(
-                        {
-                            "task_name": s.get("task_name"),
-                            "opc_url": s.get("opc_url"),
-                            "node_id": s.get("node_id"),
-                            "target_value": s.get("target_value"),
-                            "data_type": s.get("data_type", "auto"),
-                            "rrule_str": s.get("rrule_str"),
-                            "category_id": 1,
-                            "opc_security_policy": s.get("opc_security_policy", "None"),
-                            "opc_security_mode": s.get("opc_security_mode", "None"),
-                            "opc_username": s.get("opc_username", ""),
-                            "opc_password": s.get("opc_password", ""),
-                            "opc_timeout": s.get("opc_timeout", 5),
-                            "opc_write_timeout": s.get("opc_write_timeout", 3),
-                            "is_enabled": s.get("is_enabled", 1),
-                        }
-                    )
-                profile_data['schedules'] = schedules
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(profile_data, f, indent=2, ensure_ascii=False)
-            
-            QMessageBox.information(self, "成功", f"已儲存 Project 設定檔:\n{file_path}")
-            self.status_bar.showMessage(f"已儲存 Project: {file_path}", 5000)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "錯誤", f"儲存設定檔失敗:\n{str(e)}")
+        self.on_database_path_changed(file_path)
+        self.status_bar.showMessage(f"已開啟 Project DB: {file_path}", 5000)
+        QMessageBox.information(self, "開啟完成", f"已開啟 Project 資料庫:\n{file_path}")
 
     def show_database_settings(self):
         """顯示資料庫設定對話框"""
@@ -2082,31 +2106,39 @@ class CalendarUA(QMainWindow):
         dialog.exec()
 
     def new_project(self):
-        """
-        建立新的 Project：
-        - 清除目前資料庫中所有排程（schedules），相關例外會因外鍵自動刪除
-        - 保留假日日曆等設定，方便重複使用
-        """
-        reply = QMessageBox.question(
+        """建立新的專案資料庫（.db）。"""
+        file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "New Project",
-            "建立新的 Project 將會清除目前所有排程資料（但保留假日設定）。\n此操作無法復原，確定要繼續嗎？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            "建立新的 Project 資料庫",
+            "calendarua_project.db",
+            "SQLite 資料庫 (*.db);;所有檔案 (*)",
         )
-        if reply != QMessageBox.Yes:
+
+        if not file_path:
             return
 
-        if not self.db_manager:
-            QMessageBox.warning(self, "警告", "尚未連線資料庫，無法建立新 Project。")
-            return
+        if not file_path.lower().endswith(".db"):
+            file_path = f"{file_path}.db"
 
-        if self.db_manager.clear_all_schedules():
-            # 重新載入，讓 UI 與排程執行緒都看到乾淨狀態
-            self.load_schedules()
-            self.status_bar.showMessage("已建立新 Project（所有排程已清空）。", 5000)
-        else:
-            QMessageBox.critical(self, "錯誤", "清除排程資料失敗，新 Project 建立未完成。")
+        if os.path.exists(file_path):
+            reply = QMessageBox.question(
+                self,
+                "檔案已存在",
+                f"資料庫已存在，是否覆蓋重建？\n\n{file_path}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                QMessageBox.critical(self, "錯誤", f"無法覆蓋既有檔案:\n{str(e)}")
+                return
+
+        self.on_database_path_changed(file_path)
+        self.status_bar.showMessage(f"已建立新 Project DB: {file_path}", 5000)
+        QMessageBox.information(self, "建立完成", f"已建立新的 Project 資料庫:\n{file_path}")
 
     def show_about(self):
         """顯示關於對話框"""
@@ -2710,8 +2742,7 @@ class OPCNodeBrowserDialog(QDialog):
 
             self.status_label.setText("已載入節點")
             # 確保樹狀元件正確更新
-            self.tree_widget.update()
-            self.tree_widget.repaint()
+            self.tree_widget.viewport().update()
 
         except Exception as e:
             self.status_label.setText(f"載入節點錯誤: {str(e)}")
@@ -3582,6 +3613,10 @@ class ScheduleEditDialog(QDialog):
         self.opc_timeout = schedule.get("opc_timeout", 5) if schedule else 5
         self.opc_write_timeout = schedule.get("opc_write_timeout", 3) if schedule else 3
         self.is_enabled = schedule.get("is_enabled", 1) if schedule else 1
+        self._last_opc_url = ""
+
+        if not schedule and self.db_manager:
+            self._load_last_opc_defaults()
 
         self.setup_ui()
         self.apply_style()
@@ -3597,7 +3632,7 @@ class ScheduleEditDialog(QDialog):
     def setup_ui(self):
         self.setWindowTitle("編輯排程" if self.schedule else "新增排程")
         self.setWindowIcon(get_app_icon())
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(780)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -3618,6 +3653,8 @@ class ScheduleEditDialog(QDialog):
         opc_url_layout.setSpacing(5)
         self.opc_url_edit = QLineEdit()
         self.opc_url_edit.setPlaceholderText("localhost:4840")
+        if self._last_opc_url:
+            self.opc_url_edit.setText(self._last_opc_url)
         opc_url_layout.addWidget(self.opc_url_edit)
         # 添加協議標籤顯示
         self.opc_protocol_label = QLabel("opc.tcp://")
@@ -3985,6 +4022,20 @@ class ScheduleEditDialog(QDialog):
 
         self.original_rrule = rrule_str
 
+        # 記住本次使用的 OPC URL 與安全設定，供下次新增排程預設帶入
+        if self.db_manager:
+            self.db_manager.save_last_opc_defaults(
+                {
+                    "opc_url": self._normalize_opc_url(),
+                    "opc_security_policy": self.opc_security_policy,
+                    "opc_security_mode": self.opc_security_mode,
+                    "opc_username": self.opc_username,
+                    "opc_password": self.opc_password,
+                    "opc_timeout": self.opc_timeout,
+                    "opc_write_timeout": self.opc_write_timeout,
+                }
+            )
+
         # 如果檢查通過，接受對話框
         self.accept()
 
@@ -4051,6 +4102,24 @@ class ScheduleEditDialog(QDialog):
             url = f"opc.tcp://{url}"
 
         return url
+
+    def _load_last_opc_defaults(self):
+        """新增排程時讀取上一次使用的 OPC 設定。"""
+        if not self.db_manager:
+            return
+
+        defaults = self.db_manager.get_last_opc_defaults() or {}
+        last_opc_url = (defaults.get("opc_url") or "").strip()
+        if last_opc_url.startswith("opc.tcp://"):
+            last_opc_url = last_opc_url[10:]
+
+        self._last_opc_url = last_opc_url
+        self.opc_security_policy = defaults.get("opc_security_policy", self.opc_security_policy)
+        self.opc_security_mode = defaults.get("opc_security_mode", self.opc_security_mode)
+        self.opc_username = defaults.get("opc_username", self.opc_username)
+        self.opc_password = defaults.get("opc_password", self.opc_password)
+        self.opc_timeout = int(defaults.get("opc_timeout", self.opc_timeout) or self.opc_timeout)
+        self.opc_write_timeout = int(defaults.get("opc_write_timeout", self.opc_write_timeout) or self.opc_write_timeout)
 
 
 def main():

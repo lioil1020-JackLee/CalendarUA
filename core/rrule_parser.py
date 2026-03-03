@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta
-from typing import Optional, Iterator
+from datetime import date, datetime, timedelta
+from typing import Optional
 from dateutil.rrule import rrulestr, rrule
-from dateutil.parser import parse
 import logging
+
+from core.lunar_calendar import to_lunar
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -10,6 +11,227 @@ logger = logging.getLogger(__name__)
 
 class RRuleParser:
     """RRULE 解析器，負責解析週期性規則並計算下一次觸發時間"""
+
+    @staticmethod
+    def _split_rrule_parts(rrule_str: str) -> tuple[dict[str, str], str]:
+        params: dict[str, str] = {}
+        dtstart_raw = ""
+        for part in (rrule_str or "").split(";"):
+            p = part.strip()
+            if not p:
+                continue
+            if p.startswith("DTSTART:"):
+                dtstart_raw = p.split(":", 1)[1]
+                continue
+            if "=" in p:
+                key, value = p.split("=", 1)
+                params[key.upper()] = value
+        return params, dtstart_raw
+
+    @staticmethod
+    def _parse_dtstart(dtstart_raw: str, fallback: Optional[datetime] = None) -> datetime:
+        if dtstart_raw:
+            for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M", "%Y%m%d"):
+                try:
+                    parsed = datetime.strptime(dtstart_raw, fmt)
+                    if fmt == "%Y%m%d":
+                        return parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+                    return parsed.replace(microsecond=0)
+                except ValueError:
+                    continue
+        if fallback is not None:
+            return fallback.replace(microsecond=0)
+        return datetime.now().replace(second=0, microsecond=0)
+
+    @staticmethod
+    def _to_int(value: Optional[str], default: int) -> int:
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _is_lunar_mode(params: dict[str, str]) -> bool:
+        return params.get("X-LUNAR", "0") == "1"
+
+    @staticmethod
+    def _supports_lunar_custom(params: dict[str, str]) -> bool:
+        return params.get("FREQ", "").upper() in {"DAILY", "WEEKLY", "MONTHLY", "YEARLY"}
+
+    @staticmethod
+    def _build_solar_rrule_string(rrule_str: str) -> tuple[str, Optional[str]]:
+        dtstart_str = None
+        parts = rrule_str.split(";")
+        rrule_parts = []
+        for part in parts:
+            p = part.strip()
+            if not p:
+                continue
+            if p.startswith("DTSTART:"):
+                dtstart_str = p.split(":", 1)[1]
+            elif p.startswith("DURATION="):
+                continue
+            elif p.startswith("X-LUNAR="):
+                continue
+            elif p.startswith("X-RANGE-START="):
+                continue
+            else:
+                rrule_parts.append(p)
+        return ";".join(rrule_parts), dtstart_str
+
+    @staticmethod
+    def _parse_range_start(params: dict[str, str]) -> Optional[datetime]:
+        raw = (params.get("X-RANGE-START") or "").strip()
+        if not raw:
+            return None
+        try:
+            if "T" in raw and len(raw) >= 15:
+                return datetime.strptime(raw[:15], "%Y%m%dT%H%M%S")
+            if len(raw) >= 8:
+                d = datetime.strptime(raw[:8], "%Y%m%d")
+                return d.replace(hour=0, minute=0, second=0, microsecond=0)
+        except ValueError:
+            return None
+        return None
+
+    @staticmethod
+    def _parse_until(params: dict[str, str]) -> Optional[datetime]:
+        until = params.get("UNTIL")
+        if not until:
+            return None
+
+        for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M", "%Y%m%d"):
+            try:
+                parsed = datetime.strptime(until, fmt)
+                if fmt == "%Y%m%d":
+                    return parsed.replace(hour=23, minute=59, second=59)
+                return parsed
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _matches_lunar_rule(candidate: datetime, params: dict[str, str], dtstart: datetime) -> bool:
+        freq = params.get("FREQ", "").upper()
+        interval = max(1, RRuleParser._to_int(params.get("INTERVAL"), 1))
+
+        if freq == "DAILY":
+            day_diff = (candidate.date() - dtstart.date()).days
+            return day_diff >= 0 and day_diff % interval == 0
+
+        if freq == "WEEKLY":
+            day_diff = (candidate.date() - dtstart.date()).days
+            if day_diff < 0:
+                return False
+            week_diff = day_diff // 7
+            if week_diff % interval != 0:
+                return False
+
+            byday = params.get("BYDAY", "")
+            if not byday:
+                return candidate.weekday() == dtstart.weekday()
+
+            weekday_map = {
+                "MO": 0,
+                "TU": 1,
+                "WE": 2,
+                "TH": 3,
+                "FR": 4,
+                "SA": 5,
+                "SU": 6,
+            }
+            allowed = {
+                weekday_map[token.strip()]
+                for token in byday.split(",")
+                if token.strip() in weekday_map
+            }
+            if not allowed:
+                return candidate.weekday() == dtstart.weekday()
+            return candidate.weekday() in allowed
+
+        start_lunar = to_lunar(dtstart.date())
+        candidate_lunar = to_lunar(candidate.date())
+        if not start_lunar or not candidate_lunar:
+            return False
+
+        bymonth = params.get("BYMONTH")
+        bymonthday = params.get("BYMONTHDAY")
+
+        if freq == "MONTHLY":
+            day_target = RRuleParser._to_int(bymonthday, start_lunar.lunar_day)
+            month_diff = ((candidate_lunar.lunar_year - start_lunar.lunar_year) * 12
+                          + (candidate_lunar.lunar_month - start_lunar.lunar_month))
+            if month_diff < 0 or month_diff % interval != 0:
+                return False
+            return candidate_lunar.lunar_day == day_target
+
+        if freq == "YEARLY":
+            month_target = RRuleParser._to_int(bymonth, start_lunar.lunar_month)
+            day_target = RRuleParser._to_int(bymonthday, start_lunar.lunar_day)
+            year_diff = candidate_lunar.lunar_year - start_lunar.lunar_year
+            if year_diff < 0 or year_diff % interval != 0:
+                return False
+            return candidate_lunar.lunar_month == month_target and candidate_lunar.lunar_day == day_target
+
+        return False
+
+    @staticmethod
+    def _generate_lunar_occurrences(
+        rrule_str: str,
+        horizon_end: datetime,
+        lower_bound: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> list[datetime]:
+        params, dtstart_raw = RRuleParser._split_rrule_parts(rrule_str)
+        dtstart = RRuleParser._parse_dtstart(dtstart_raw)
+
+        hour = RRuleParser._to_int(params.get("BYHOUR"), dtstart.hour)
+        minute = RRuleParser._to_int(params.get("BYMINUTE"), dtstart.minute)
+        second = RRuleParser._to_int(params.get("BYSECOND"), dtstart.second)
+
+        until = RRuleParser._parse_until(params)
+        count = max(0, RRuleParser._to_int(params.get("COUNT"), 0))
+
+        if horizon_end < dtstart:
+            return []
+
+        if until and until < dtstart:
+            return []
+
+        end_dt = horizon_end
+        if until is not None and until < end_dt:
+            end_dt = until
+
+        occurrences: list[datetime] = []
+        emitted_total = 0
+        cursor = dtstart.date()
+        end_date = end_dt.date()
+
+        while cursor <= end_date:
+            candidate = datetime(cursor.year, cursor.month, cursor.day, hour, minute, second)
+
+            if candidate < dtstart:
+                cursor += timedelta(days=1)
+                continue
+
+            if until is not None and candidate > until:
+                break
+
+            if RRuleParser._matches_lunar_rule(candidate, params, dtstart):
+                emitted_total += 1
+                if count > 0 and emitted_total > count:
+                    break
+
+                if lower_bound is None or candidate >= lower_bound:
+                    occurrences.append(candidate)
+                    if limit is not None and len(occurrences) >= limit:
+                        break
+
+            cursor += timedelta(days=1)
+
+        return occurrences
 
     @staticmethod
     def parse_rrule(
@@ -26,28 +248,12 @@ class RRuleParser:
             Optional[rrule]: rrule 物件，解析失敗回傳 None
         """
         try:
-            # 從 RRULE 字串中提取 DTSTART 和過濾不支援的參數
-            dtstart_str = None
-            if "DTSTART:" in rrule_str:
-                parts = rrule_str.split(";")
-                rrule_parts = []
-                for part in parts:
-                    if part.startswith("DTSTART:"):
-                        dtstart_str = part.split(":", 1)[1]
-                    elif part.startswith("DURATION="):
-                        # 忽略 DURATION 參數，因為 dateutil.rrule 不支援
-                        continue
-                    else:
-                        rrule_parts.append(part)
-                rrule_str = ";".join(rrule_parts)
+            # 從 RRULE 字串中提取 DTSTART，並移除 dateutil 不支援參數
+            rrule_str, dtstart_str = RRuleParser._build_solar_rrule_string(rrule_str)
 
             if dtstart is None:
                 if dtstart_str:
-                    # 解析 DTSTART 字串
-                    try:
-                        dtstart = datetime.strptime(dtstart_str, "%Y%m%dT%H%M%S")
-                    except ValueError:
-                        dtstart = datetime.now().replace(second=0, microsecond=0)
+                    dtstart = RRuleParser._parse_dtstart(dtstart_str)
                 else:
                     dtstart = datetime.now().replace(second=0, microsecond=0)
 
@@ -80,12 +286,33 @@ class RRuleParser:
             Optional[datetime]: 下一次觸發時間，無效回傳 None
         """
         try:
+            params, _ = RRuleParser._split_rrule_parts(rrule_str)
+            range_start = RRuleParser._parse_range_start(params)
+            if RRuleParser._is_lunar_mode(params) and RRuleParser._supports_lunar_custom(params):
+                if after is None:
+                    after = datetime.now()
+                if range_start is not None and after < range_start:
+                    after = range_start - timedelta(seconds=1)
+                search_from = after + timedelta(seconds=1)
+                horizon = after + timedelta(days=365 * 20)
+                occurrences = RRuleParser._generate_lunar_occurrences(
+                    rrule_str,
+                    horizon_end=horizon,
+                    lower_bound=search_from,
+                    limit=1,
+                )
+                if occurrences:
+                    return occurrences[0]
+                return None
+
             rule = RRuleParser.parse_rrule(rrule_str, dtstart)
             if rule is None:
                 return None
 
             if after is None:
                 after = datetime.now()
+            if range_start is not None and after < range_start:
+                after = range_start - timedelta(seconds=1)
 
             # 取得 after 之後的下一個觸發時間
             next_trigger = rule.after(after, inc=False)
@@ -115,12 +342,30 @@ class RRuleParser:
         不會修改或依賴任何 UI / 資料庫邏輯。
         """
         try:
+            params, _ = RRuleParser._split_rrule_parts(rrule_str)
+            range_start = RRuleParser._parse_range_start(params)
+            if RRuleParser._is_lunar_mode(params) and RRuleParser._supports_lunar_custom(params):
+                if after is None:
+                    after = datetime.now()
+                if range_start is not None and after < range_start:
+                    after = range_start - timedelta(seconds=1)
+                search_from = after + timedelta(seconds=1)
+                horizon = after + timedelta(days=365 * 20)
+                return RRuleParser._generate_lunar_occurrences(
+                    rrule_str,
+                    horizon_end=horizon,
+                    lower_bound=search_from,
+                    limit=max(0, count),
+                )
+
             rule = RRuleParser.parse_rrule(rrule_str, dtstart)
             if rule is None:
                 return []
 
             if after is None:
                 after = datetime.now()
+            if range_start is not None and after < range_start:
+                after = range_start - timedelta(seconds=1)
 
             triggers: list[datetime] = []
             current = rule.after(after, inc=False)
@@ -154,6 +399,15 @@ class RRuleParser:
             list: 觸發時間列表
         """
         try:
+            params, _ = RRuleParser._split_rrule_parts(rrule_str)
+            if RRuleParser._is_lunar_mode(params) and RRuleParser._supports_lunar_custom(params):
+                occurrences = RRuleParser._generate_lunar_occurrences(
+                    rrule_str,
+                    horizon_end=end,
+                    lower_bound=start,
+                )
+                return [occ for occ in occurrences if occ <= end]
+
             rule = RRuleParser.parse_rrule(rrule_str, dtstart)
             if rule is None:
                 return []
@@ -187,6 +441,18 @@ class RRuleParser:
             if check_time is None:
                 check_time = datetime.now()
 
+            params, _ = RRuleParser._split_rrule_parts(rrule_str)
+            range_start = RRuleParser._parse_range_start(params)
+            if range_start is not None and check_time < range_start:
+                return False
+            if RRuleParser._is_lunar_mode(params) and RRuleParser._supports_lunar_custom(params):
+                window_start = check_time - timedelta(seconds=tolerance_seconds)
+                window_end = check_time
+                if range_start is not None and window_start < range_start:
+                    window_start = range_start
+                triggers = RRuleParser.get_trigger_between(rrule_str, window_start, window_end)
+                return any(0 <= (check_time - trigger).total_seconds() <= tolerance_seconds for trigger in triggers)
+
             # 取得上一次和下一次觸發時間
             rule = RRuleParser.parse_rrule(
                 rrule_str, dtstart=check_time - timedelta(days=1)
@@ -194,18 +460,12 @@ class RRuleParser:
             if rule is None:
                 return False
 
-            # 取得最接近 check_time 的觸發時間
+            # 只檢查 check_time 之前最近一次觸發，避免提早觸發
             prev_trigger = rule.before(check_time, inc=True)
-            next_trigger = rule.after(check_time, inc=False)
 
             # 檢查是否接近觸發時間
             if prev_trigger:
-                diff = abs((check_time - prev_trigger).total_seconds())
-                if diff <= tolerance_seconds:
-                    return True
-
-            if next_trigger:
-                diff = abs((next_trigger - check_time).total_seconds())
+                diff = (check_time - prev_trigger).total_seconds()
                 if diff <= tolerance_seconds:
                     return True
 
@@ -227,6 +487,17 @@ class RRuleParser:
             bool: 有效回傳 True
         """
         try:
+            params, _ = RRuleParser._split_rrule_parts(rrule_str)
+            if RRuleParser._is_lunar_mode(params) and RRuleParser._supports_lunar_custom(params):
+                dtstart = RRuleParser._parse_dtstart(RRuleParser._split_rrule_parts(rrule_str)[1])
+                RRuleParser._generate_lunar_occurrences(
+                    rrule_str,
+                    horizon_end=dtstart + timedelta(days=370),
+                    lower_bound=dtstart,
+                    limit=1,
+                )
+                return True
+
             RRuleParser.parse_rrule(rrule_str)
             return True
         except Exception:

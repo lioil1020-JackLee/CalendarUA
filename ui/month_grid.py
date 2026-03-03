@@ -25,6 +25,24 @@ def _format_lunar_day(info: LunarDateInfo) -> str:
     numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
     if n <= 0 or n > 30:
         return ""
+    if n == 1:
+        month_names = {
+            1: "元",
+            2: "二",
+            3: "三",
+            4: "四",
+            5: "五",
+            6: "六",
+            7: "七",
+            8: "八",
+            9: "九",
+            10: "十",
+            11: "十一",
+            12: "十二",
+        }
+        month_text = month_names.get(info.lunar_month, str(info.lunar_month))
+        leap_prefix = "閏" if info.is_leap_month else ""
+        return f"{leap_prefix}{month_text}月"
     if n == 10:
         return "初十"
     if n == 20:

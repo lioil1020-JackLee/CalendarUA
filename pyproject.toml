@@ -13,6 +13,7 @@ dependencies = [
     "asyncua==1.1.5",
     "python-dateutil==2.9.0",
     "qasync==0.27.1",
+    "lunardate==0.2.2",
 ]
 
 [tool.setuptools]

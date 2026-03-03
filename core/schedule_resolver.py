@@ -34,6 +34,34 @@ def _extract_duration_minutes(rrule_str: str) -> int:
     return total if total > 0 else 60
 
 
+def _extract_dtstart(rrule_str: str) -> Optional[datetime]:
+    match = re.search(r"DTSTART:(\d{8}(?:T\d{6})?)", rrule_str.upper())
+    if not match:
+        return None
+
+    raw = match.group(1)
+    try:
+        if "T" in raw:
+            return datetime.strptime(raw, "%Y%m%dT%H%M%S")
+        return datetime.strptime(raw, "%Y%m%d")
+    except ValueError:
+        return None
+
+
+def _extract_range_start(rrule_str: str) -> Optional[datetime]:
+    match = re.search(r"X-RANGE-START=(\d{8}(?:T\d{6})?)", rrule_str.upper())
+    if not match:
+        return None
+
+    raw = match.group(1)
+    try:
+        if "T" in raw:
+            return datetime.strptime(raw, "%Y%m%dT%H%M%S")
+        return datetime.strptime(raw, "%Y%m%d")
+    except ValueError:
+        return None
+
+
 def _extract_title(schedule: Dict[str, Any]) -> str:
     task_name = str(schedule.get("task_name", "")).strip()
     return task_name or f"任務{schedule.get('id', '')}"
@@ -151,14 +179,41 @@ def resolve_occurrences_for_range(
             continue
 
         triggers = RRuleParser.get_trigger_between(rrule_str, range_start, range_end)
-        if not triggers:
-            continue
-
+        configured_range_start = _extract_range_start(rrule_str)
         duration_minutes = _extract_duration_minutes(rrule_str)
         title = _extract_title(schedule)
         target_value = _extract_target_value(schedule)
-        
+
         schedule_bg, schedule_fg = _pick_color(target_value)
+
+        if not triggers:
+            dtstart = _extract_dtstart(rrule_str)
+            upper_rrule = rrule_str.upper()
+            has_expire_condition = ("UNTIL=" in upper_rrule) or ("COUNT=" in upper_rrule)
+            next_trigger = RRuleParser.get_next_trigger(rrule_str, after=datetime.now())
+            is_truly_expired = has_expire_condition and next_trigger is None
+
+            if (
+                is_truly_expired
+                and dtstart
+                and range_start <= dtstart < range_end
+                and dtstart <= datetime.now()
+            ):
+                expired_occurrence = ResolvedOccurrence(
+                    schedule_id=int(schedule.get("id", 0) or 0),
+                    source="expired",
+                    title=f"{title} (過期)",
+                    start=dtstart,
+                    end=dtstart + timedelta(minutes=duration_minutes),
+                    category_bg="#000000",
+                    category_fg="#ffffff",
+                    target_value=target_value,
+                    is_exception=False,
+                    is_holiday=False,
+                    occurrence_key=f"{int(schedule.get('id', 0) or 0)}:{dtstart.isoformat()}:expired",
+                )
+                occurrences.append(expired_occurrence)
+            continue
 
         for trigger in triggers:
             start = trigger
@@ -220,6 +275,12 @@ def resolve_occurrences_for_range(
             else:
                 # 沒有 exception 覆寫,保留 holiday 或 schedule 顏色
                 pass
+
+            if configured_range_start and resolved_start < configured_range_start:
+                if not resolved_title.endswith("(過期)"):
+                    resolved_title = f"{resolved_title} (過期)"
+                source = "expired"
+                bg_color, fg_color = "#000000", "#ffffff"
 
             if resolved_end <= resolved_start:
                 continue

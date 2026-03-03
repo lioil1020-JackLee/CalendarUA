@@ -1,6 +1,6 @@
 """
 資料庫設定對話框
-提供資料庫路徑設定、備份、還原等功能
+提供資料庫路徑設定與資訊檢視功能
 """
 
 from PySide6.QtWidgets import (
@@ -15,13 +15,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QTextEdit,
-    QProgressBar,
-    QFrame,
 )
-from PySide6.QtCore import Qt, Signal, QThread, QTimer
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QIcon
 import os
-import shutil
 from pathlib import Path
 from datetime import datetime
 from database.sqlite_manager import SQLiteManager
@@ -59,7 +56,7 @@ class DatabaseSettingsDialog(QDialog):
         self.setWindowTitle("資料庫設定")
         self.setWindowIcon(get_app_icon())
         self.setMinimumWidth(500)
-        self.setMinimumHeight(400)
+        self.setMinimumHeight(560)
         self.setModal(True)
 
         self.setup_ui()
@@ -75,9 +72,6 @@ class DatabaseSettingsDialog(QDialog):
 
         # 資料庫路徑設定區塊
         main_layout.addWidget(self.create_path_group())
-
-        # 資料庫操作區塊
-        main_layout.addWidget(self.create_operations_group())
 
         # 資料庫資訊區塊
         main_layout.addWidget(self.create_info_group())
@@ -110,41 +104,6 @@ class DatabaseSettingsDialog(QDialog):
 
         return group
 
-    def create_operations_group(self) -> QGroupBox:
-        """建立資料庫操作區塊"""
-        group = QGroupBox("資料庫操作")
-        layout = QVBoxLayout(group)
-        layout.setSpacing(8)
-        layout.setContentsMargins(12, 12, 12, 12)
-
-        # 操作按鈕
-        operations_layout = QHBoxLayout()
-
-        self.backup_btn = QPushButton("備份資料庫")
-        # self.backup_btn.setIcon(self.style().standardIcon(self.style().SP_DialogSaveButton))
-        self.backup_btn.clicked.connect(self.backup_database)
-        operations_layout.addWidget(self.backup_btn)
-
-        self.restore_btn = QPushButton("還原資料庫")
-        # self.restore_btn.setIcon(self.style().standardIcon(self.style().SP_DialogOpenButton))
-        self.restore_btn.clicked.connect(self.restore_database)
-        operations_layout.addWidget(self.restore_btn)
-
-        self.clear_btn = QPushButton("清除所有資料")
-        # self.clear_btn.setIcon(self.style().standardIcon(self.style().SP_TrashIcon))
-        self.clear_btn.setStyleSheet("QPushButton { color: red; }")
-        self.clear_btn.clicked.connect(self.clear_database)
-        operations_layout.addWidget(self.clear_btn)
-
-        layout.addLayout(operations_layout)
-
-        # 進度條（用於長時間操作）
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-
-        return group
-
     def create_info_group(self) -> QGroupBox:
         """建立資料庫資訊區塊"""
         group = QGroupBox("資料庫資訊")
@@ -154,12 +113,9 @@ class DatabaseSettingsDialog(QDialog):
 
         self.info_text = QTextEdit()
         self.info_text.setReadOnly(True)
-        self.info_text.setMaximumHeight(120)
+        self.info_text.setMinimumHeight(300)
+        self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self.info_text)
-
-        refresh_btn = QPushButton("重新整理資訊")
-        refresh_btn.clicked.connect(self.refresh_database_info)
-        layout.addWidget(refresh_btn)
 
         return group
 
@@ -406,140 +362,6 @@ class DatabaseSettingsDialog(QDialog):
                 "路徑變更",
                 "資料庫路徑已更新。請重新啟動應用程式以使用新資料庫。"
             )
-
-    def backup_database(self):
-        """備份資料庫"""
-        if not self.db_manager:
-            QMessageBox.warning(self, "錯誤", "資料庫管理器未初始化")
-            return
-
-        current_path = Path(self.path_edit.text())
-        if not current_path.exists():
-            QMessageBox.warning(self, "錯誤", "資料庫檔案不存在")
-            return
-
-        # 產生備份檔案名稱
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"calendarua_backup_{timestamp}.db"
-
-        backup_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "選擇備份位置",
-            backup_name,
-            "SQLite 資料庫 (*.db);;所有檔案 (*)",
-        )
-
-        if backup_path:
-            try:
-                # 確保副檔名
-                if not backup_path.endswith('.db'):
-                    backup_path += '.db'
-
-                shutil.copy2(current_path, backup_path)
-
-                QMessageBox.information(
-                    self,
-                    "備份成功",
-                    f"資料庫已成功備份到:\n{backup_path}"
-                )
-
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "備份失敗",
-                    f"無法備份資料庫:\n{str(e)}"
-                )
-
-    def restore_database(self):
-        """還原資料庫"""
-        if not self.db_manager:
-            QMessageBox.warning(self, "錯誤", "資料庫管理器未初始化")
-            return
-
-        backup_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "選擇備份檔案",
-            "",
-            "SQLite 資料庫 (*.db);;所有檔案 (*)",
-        )
-
-        if backup_path:
-            reply = QMessageBox.question(
-                self,
-                "確認還原",
-                "還原資料庫將覆蓋現有資料，此操作無法復原。\n\n確定要繼續嗎？",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-
-            if reply == QMessageBox.Yes:
-                try:
-                    current_path = Path(self.path_edit.text())
-                    # 確保目標目錄存在
-                    current_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    shutil.copy2(backup_path, current_path)
-
-                    QMessageBox.information(
-                        self,
-                        "還原成功",
-                        "資料庫已成功還原。請重新啟動應用程式以載入還原的資料。"
-                    )
-
-                    # 重新整理資訊
-                    self.refresh_database_info()
-
-                except Exception as e:
-                    QMessageBox.critical(
-                        self,
-                        "還原失敗",
-                        f"無法還原資料庫:\n{str(e)}"
-                    )
-
-    def clear_database(self):
-        """清除所有資料"""
-        if not self.db_manager:
-            QMessageBox.warning(self, "錯誤", "資料庫管理器未初始化")
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "危險操作",
-            "清除所有資料將刪除所有排程記錄，此操作無法復原。\n\n確定要繼續嗎？",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-
-        if reply == QMessageBox.Yes:
-            # 再次確認
-            reply2 = QMessageBox.question(
-                self,
-                "最後確認",
-                "這是最後的確認：\n\n所有排程資料將被永久刪除！\n\n確定要清除所有資料嗎？",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-
-            if reply2 == QMessageBox.Yes:
-                try:
-                    success = self.db_manager.clear_all_schedules()
-                    if success:
-                        QMessageBox.information(
-                            self,
-                            "清除完成",
-                            "所有排程資料已清除。"
-                        )
-                        self.refresh_database_info()
-                    else:
-                        QMessageBox.critical(
-                            self,
-                            "清除失敗",
-                            "清除資料時發生錯誤。"
-                        )
-
-                except Exception as e:
-                    QMessageBox.critical(
-                        self,
-                        "清除失敗",
-                        f"清除資料時發生錯誤:\n{str(e)}"
-                    )
 
     def refresh_database_info(self):
         """重新整理資料庫資訊"""

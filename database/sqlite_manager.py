@@ -163,6 +163,13 @@ class SQLiteManager:
                         output_type TEXT DEFAULT 'OPC UA Write',
                         refresh_output INTEGER DEFAULT 1,
                         generate_events INTEGER DEFAULT 1,
+                        last_opc_url TEXT DEFAULT '',
+                        last_opc_security_policy TEXT DEFAULT 'None',
+                        last_opc_security_mode TEXT DEFAULT 'None',
+                        last_opc_username TEXT DEFAULT '',
+                        last_opc_password TEXT DEFAULT '',
+                        last_opc_timeout INTEGER DEFAULT 5,
+                        last_opc_write_timeout INTEGER DEFAULT 3,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -377,6 +384,30 @@ class SQLiteManager:
                         "ALTER TABLE holiday_entries ADD COLUMN override_target_value TEXT"
                     )
                     logger.info("已添加 holiday_entries.override_target_value 欄位")
+
+                cursor.execute("PRAGMA table_info(general_settings)")
+                general_columns = [column[1] for column in cursor.fetchall()]
+                if "last_opc_url" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_url TEXT DEFAULT ''")
+                    logger.info("已添加 general_settings.last_opc_url 欄位")
+                if "last_opc_security_policy" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_security_policy TEXT DEFAULT 'None'")
+                    logger.info("已添加 general_settings.last_opc_security_policy 欄位")
+                if "last_opc_security_mode" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_security_mode TEXT DEFAULT 'None'")
+                    logger.info("已添加 general_settings.last_opc_security_mode 欄位")
+                if "last_opc_username" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_username TEXT DEFAULT ''")
+                    logger.info("已添加 general_settings.last_opc_username 欄位")
+                if "last_opc_password" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_password TEXT DEFAULT ''")
+                    logger.info("已添加 general_settings.last_opc_password 欄位")
+                if "last_opc_timeout" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_timeout INTEGER DEFAULT 5")
+                    logger.info("已添加 general_settings.last_opc_timeout 欄位")
+                if "last_opc_write_timeout" not in general_columns:
+                    cursor.execute("ALTER TABLE general_settings ADD COLUMN last_opc_write_timeout INTEGER DEFAULT 3")
+                    logger.info("已添加 general_settings.last_opc_write_timeout 欄位")
 
                 # 依照下一次執行時間優化查詢效能（排程掃描常用）
                 cursor.execute(
@@ -1088,6 +1119,83 @@ class SQLiteManager:
                 return True
         except sqlite3.Error as e:
             logger.error(f"儲存 general settings 失敗: {e}")
+            return False
+
+    def get_last_opc_defaults(self) -> Dict[str, Any]:
+        """取得上一次使用的 OPC 設定（給新增排程預設帶入）。"""
+        settings = self.get_general_settings() or {}
+        return {
+            "opc_url": settings.get("last_opc_url", "") or "",
+            "opc_security_policy": settings.get("last_opc_security_policy", "None") or "None",
+            "opc_security_mode": settings.get("last_opc_security_mode", "None") or "None",
+            "opc_username": settings.get("last_opc_username", "") or "",
+            "opc_password": settings.get("last_opc_password", "") or "",
+            "opc_timeout": int(settings.get("last_opc_timeout", 5) or 5),
+            "opc_write_timeout": int(settings.get("last_opc_write_timeout", 3) or 3),
+        }
+
+    def save_last_opc_defaults(self, defaults: Dict[str, Any]) -> bool:
+        """儲存上一次使用的 OPC 設定。"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM general_settings LIMIT 1")
+                existing = cursor.fetchone()
+
+                if existing:
+                    cursor.execute(
+                        """
+                        UPDATE general_settings
+                        SET last_opc_url = ?,
+                            last_opc_security_policy = ?,
+                            last_opc_security_mode = ?,
+                            last_opc_username = ?,
+                            last_opc_password = ?,
+                            last_opc_timeout = ?,
+                            last_opc_write_timeout = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (
+                            defaults.get("opc_url", ""),
+                            defaults.get("opc_security_policy", "None"),
+                            defaults.get("opc_security_mode", "None"),
+                            defaults.get("opc_username", ""),
+                            defaults.get("opc_password", ""),
+                            int(defaults.get("opc_timeout", 5) or 5),
+                            int(defaults.get("opc_write_timeout", 3) or 3),
+                            existing["id"],
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO general_settings (
+                            profile_name, description, enable_schedule, scan_rate, refresh_rate,
+                            last_opc_url, last_opc_security_policy, last_opc_security_mode,
+                            last_opc_username, last_opc_password, last_opc_timeout, last_opc_write_timeout
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "預設 Profile",
+                            "CalendarUA 排程系統",
+                            1,
+                            1,
+                            5,
+                            defaults.get("opc_url", ""),
+                            defaults.get("opc_security_policy", "None"),
+                            defaults.get("opc_security_mode", "None"),
+                            defaults.get("opc_username", ""),
+                            defaults.get("opc_password", ""),
+                            int(defaults.get("opc_timeout", 5) or 5),
+                            int(defaults.get("opc_write_timeout", 3) or 3),
+                        ),
+                    )
+
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"儲存最後 OPC 設定失敗: {e}")
             return False
 
     # ==================== Runtime Override ====================

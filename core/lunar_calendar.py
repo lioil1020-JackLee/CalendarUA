@@ -43,6 +43,13 @@ def _load_backend():
     若找不到，回傳 (None, None)，呼叫者需自行處理降級行為。
     """
     try:
+        import lunardate  # type: ignore
+
+        return lunardate, "lunardate"
+    except Exception:
+        pass
+
+    try:
         import lunarcalendar  # type: ignore
 
         return lunarcalendar, "lunarcalendar"
@@ -59,9 +66,17 @@ def to_lunar(gregorian: date) -> Optional[LunarDateInfo]:
     if backend is None:
         return None
 
-    # 以下為範例邏輯，實際需依照選用套件 API 實作
     try:
-        # 假設 backend 提供 LunarDate.from_solar(year, month, day)
+        if name == "lunardate":
+            lunar = backend.LunarDate.fromSolarDate(gregorian.year, gregorian.month, gregorian.day)
+            return LunarDateInfo(
+                gregorian=gregorian,
+                lunar_year=lunar.year,
+                lunar_month=lunar.month,
+                lunar_day=lunar.day,
+                is_leap_month=getattr(lunar, "isLeapMonth", False),
+            )
+
         lunar = backend.Converter.Solar2Lunar(gregorian)  # type: ignore[attr-defined]
         return LunarDateInfo(
             gregorian=gregorian,
@@ -84,6 +99,10 @@ def from_lunar(year: int, month: int, day: int, leap: bool = False) -> Optional[
         return None
 
     try:
+        if name == "lunardate":
+            solar = backend.LunarDate(year, month, day, leap).toSolarDate()
+            return date(solar.year, solar.month, solar.day)
+
         lunar = backend.Lunar(year, month, day, isleap=leap)  # type: ignore[attr-defined]
         solar = backend.Converter.Lunar2Solar(lunar)
         return date(solar.year, solar.month, solar.day)

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QPushButton,
     QDateEdit,
+    QCalendarWidget,
     QGroupBox,
     QRadioButton,
     QButtonGroup,
@@ -21,8 +22,12 @@ from PySide6.QtWidgets import (
     QTimeEdit,
     QFrame,
     QMessageBox,
+    QToolButton,
+    QAbstractSpinBox,
+    QSizePolicy,
+    QStyle,
 )
-from PySide6.QtCore import Qt, QDate, QTime, Signal, QEvent
+from PySide6.QtCore import Qt, QDate, QTime, Signal, QEvent, QSize, QLocale, QPoint
 from PySide6.QtGui import QFont, QIcon
 import sys
 import os
@@ -46,6 +51,182 @@ def get_app_icon():
 
     # 預設圖示
     return QIcon()
+
+
+class DropdownNavCalendar(QCalendarWidget):
+    """自訂導覽列：上一月 / 年下拉 / 今日 / 月下拉 / 下一月。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setNavigationBarVisible(False)
+        self.setGridVisible(True)
+        self.setFirstDayOfWeek(Qt.Sunday)
+        self.setLocale(QLocale(QLocale.Chinese, QLocale.Taiwan))
+        self.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
+        self.setMinimumSize(250, 230)
+
+        header_widget = QWidget(self)
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(2, 2, 2, 2)
+        header_layout.setSpacing(0)
+
+        self.btn_prev = QToolButton(header_widget)
+        self.btn_prev.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.btn_prev.setAutoRaise(True)
+        self.btn_prev.setIconSize(QSize(20, 20))
+        self.btn_prev.setFixedSize(32, 28)
+
+        self.btn_next = QToolButton(header_widget)
+        self.btn_next.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.btn_next.setAutoRaise(True)
+        self.btn_next.setIconSize(QSize(20, 20))
+        self.btn_next.setFixedSize(32, 28)
+
+        self.combo_year = QComboBox(header_widget)
+        self.combo_month = QComboBox(header_widget)
+        self.combo_year.setFixedWidth(72)
+        self.combo_month.setFixedWidth(60)
+
+        self.btn_today = QToolButton(header_widget)
+        self.btn_today.setText("●")
+        self.btn_today.setAutoRaise(True)
+        self.btn_today.setFixedSize(22, 22)
+        self.btn_today.setToolTip("跳到今天")
+
+        header_layout.addStretch()
+        header_layout.addWidget(self.btn_prev)
+        header_layout.addWidget(self.combo_year)
+        header_layout.addWidget(self.btn_today)
+        header_layout.addWidget(self.combo_month)
+        header_layout.addWidget(self.btn_next)
+        header_layout.addStretch()
+
+        calendar_layout = self.layout()
+        if calendar_layout is not None and hasattr(calendar_layout, "setMenuBar"):
+            calendar_layout.setMenuBar(header_widget)
+
+        self._init_nav_values()
+        self._sync_nav_from_page()
+
+        self.btn_prev.clicked.connect(lambda: self._shift_month(-1))
+        self.btn_next.clicked.connect(lambda: self._shift_month(1))
+        self.btn_today.clicked.connect(self._go_today)
+        self.combo_year.currentIndexChanged.connect(self._apply_page_from_nav)
+        self.combo_month.currentIndexChanged.connect(self._apply_page_from_nav)
+        self.currentPageChanged.connect(lambda _year, _month: self._sync_nav_from_page())
+
+    def _init_nav_values(self):
+        self.combo_year.clear()
+        for year in range(2021, 2032):
+            self.combo_year.addItem(str(year), year)
+
+        self.combo_month.clear()
+        for month in range(1, 13):
+            self.combo_month.addItem(f"{month}月", month)
+
+    def _shift_month(self, delta: int):
+        page_date = QDate(self.yearShown(), self.monthShown(), 1).addMonths(delta)
+        self.setCurrentPage(page_date.year(), page_date.month())
+
+    def _go_today(self):
+        today = QDate.currentDate()
+        self.setSelectedDate(today)
+        self.setCurrentPage(today.year(), today.month())
+
+    def _sync_nav_from_page(self):
+        year = self.yearShown()
+        month = self.monthShown()
+
+        if year < 2021:
+            year = 2021
+            self.setCurrentPage(year, month)
+        elif year > 2031:
+            year = 2031
+            self.setCurrentPage(year, month)
+
+        year_index = self.combo_year.findData(year)
+        month_index = self.combo_month.findData(month)
+
+        self.combo_year.blockSignals(True)
+        self.combo_month.blockSignals(True)
+        if year_index >= 0:
+            self.combo_year.setCurrentIndex(year_index)
+        if month_index >= 0:
+            self.combo_month.setCurrentIndex(month_index)
+        self.combo_year.blockSignals(False)
+        self.combo_month.blockSignals(False)
+
+    def _apply_page_from_nav(self):
+        year = self.combo_year.currentData()
+        month = self.combo_month.currentData()
+        if isinstance(year, int) and isinstance(month, int):
+            self.setCurrentPage(year, month)
+
+
+class PopupDateEdit(QDateEdit):
+    """移除右側箭頭，點擊日期欄位直接展開月曆。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCalendarPopup(False)
+        self.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.setReadOnly(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self._calendar_popup = DropdownNavCalendar(self)
+        self._calendar_popup.setWindowFlags(Qt.Popup)
+        self._calendar_popup.clicked.connect(self._on_calendar_date_clicked)
+        self.setStyleSheet(
+            """
+            QDateEdit::drop-down {
+                width: 0px;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+            QDateEdit::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+            """
+        )
+
+        if self.lineEdit() is not None:
+            self.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.lineEdit().installEventFilter(self)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self._show_calendar_popup()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def eventFilter(self, obj, event):
+        if obj == self.lineEdit() and event.type() == QEvent.MouseButtonPress and self.isEnabled():
+            self._show_calendar_popup()
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _show_calendar_popup(self):
+        calendar = self._calendar_popup
+        if calendar is None:
+            return
+        calendar.setSelectedDate(self.date())
+        if calendar.height() < 230:
+            calendar.resize(max(calendar.width(), 250), 230)
+        popup_pos = self.mapToGlobal(QPoint(0, self.height()))
+        calendar.move(popup_pos)
+        calendar.show()
+        calendar.raise_()
+
+    def _on_calendar_date_clicked(self, date: QDate):
+        self.setDate(date)
+        calendar = self._calendar_popup
+        if calendar is not None:
+            calendar.hide()
 
 
 class RecurrenceDialog(QDialog):
@@ -73,9 +254,12 @@ class RecurrenceDialog(QDialog):
             self.setMinimumWidth(570)
             self.setMinimumHeight(480)
             self.setModal(True)
+        else:
+            self.setMinimumWidth(700)
 
         self.setup_ui()
         self.apply_modern_style()
+        self.lock_recurrence_detail_height()
         self.connect_signals()
 
         # 設置預設時間
@@ -102,7 +286,7 @@ class RecurrenceDialog(QDialog):
         today = QDate.currentDate()
 
         # 開始時間：目前時間向上取整到最近整點或 30 分
-        self.start_time_edit.setTime(self._get_rounded_current_time())
+        self.set_start_time(self._get_rounded_current_time())
 
         # 循環模式：每天 + 每個工作日
         self.radio_daily.setChecked(True)
@@ -127,7 +311,7 @@ class RecurrenceDialog(QDialog):
         else:
             default_start_time = self._get_rounded_current_time()
 
-        self.start_time_edit.setTime(default_start_time)
+        self.set_start_time(default_start_time)
 
     def _get_rounded_current_time(self) -> QTime:
         """取得目前時間向上取整到最近整點或 30 分。"""
@@ -150,7 +334,8 @@ class RecurrenceDialog(QDialog):
         main_layout.addWidget(self.create_time_group())
 
         # 循環模式區塊
-        main_layout.addWidget(self.create_recurrence_pattern_group())
+        self.recurrence_pattern_group = self.create_recurrence_pattern_group()
+        main_layout.addWidget(self.recurrence_pattern_group)
 
         # 循環範圍區塊
         main_layout.addWidget(self.create_range_group())
@@ -161,7 +346,7 @@ class RecurrenceDialog(QDialog):
 
     def create_time_group(self) -> QGroupBox:
         """建立約會時間區塊"""
-        group = QGroupBox("約會時間")
+        group = QGroupBox("排程時間")
         layout = QGridLayout(group)
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -170,21 +355,23 @@ class RecurrenceDialog(QDialog):
         start_label = QLabel("開始(T):")
         start_label.setObjectName("fieldLabel")
         layout.addWidget(start_label, 0, 0)
-        self.start_time_edit = QTimeEdit()
-        self.start_time_edit.setDisplayFormat("HH:mm:ss")
-        self.start_time_edit.setObjectName("startTimeEdit")
-        self.start_time_edit.setFixedWidth(120)
-        layout.addWidget(self.start_time_edit, 0, 1)
+        self.start_time_combo = QComboBox()
+        self.start_time_combo.setEditable(True)
+        self.start_time_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.start_time_combo.setFixedWidth(130)
+        self._populate_time_combo(self.start_time_combo)
+        layout.addWidget(self.start_time_combo, 0, 1)
 
         # 結束時間
         end_label = QLabel("結束(N):")
         end_label.setObjectName("fieldLabel")
         layout.addWidget(end_label, 1, 0)
-        self.end_time_edit = QTimeEdit()
-        self.end_time_edit.setDisplayFormat("HH:mm:ss")
-        self.end_time_edit.setObjectName("endTimeEdit")
-        self.end_time_edit.setFixedWidth(120)
-        layout.addWidget(self.end_time_edit, 1, 1)
+        self.end_time_combo = QComboBox()
+        self.end_time_combo.setEditable(True)
+        self.end_time_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.end_time_combo.setFixedWidth(130)
+        self._populate_time_combo(self.end_time_combo)
+        layout.addWidget(self.end_time_combo, 1, 1)
 
         # 期間
         duration_label = QLabel("期間(U):")
@@ -200,6 +387,90 @@ class RecurrenceDialog(QDialog):
 
         layout.setColumnStretch(2, 1)
         return group
+
+    def _populate_time_combo(self, combo: QComboBox):
+        """填入 00:00 ~ 23:30（每 30 分）時間選項，下拉顯示 HH:mm。"""
+        combo.clear()
+        for hour in range(24):
+            for minute in (0, 30):
+                time_value = QTime(hour, minute, 0)
+                combo.addItem(time_value.toString("HH:mm"), time_value)
+
+    def _parse_combo_time(self, combo: QComboBox) -> QTime:
+        """從時間下拉目前值解析為 QTime，支援 HH:mm:ss 與 HH:mm。"""
+        text = combo.currentText().strip()
+        parsed = QTime.fromString(text, "HH:mm:ss")
+        if parsed.isValid():
+            return parsed
+
+        parsed = QTime.fromString(text, "HH:mm")
+        if parsed.isValid():
+            return QTime(parsed.hour(), parsed.minute(), 0)
+
+        data = combo.currentData()
+        if isinstance(data, QTime) and data.isValid():
+            return data
+
+        return QTime(0, 0, 0)
+
+    def _set_combo_time(self, combo: QComboBox, value: QTime):
+        """設定時間下拉目前值；若不在預設清單中，仍顯示為 HH:mm:ss。"""
+        if not value.isValid():
+            value = QTime(0, 0, 0)
+
+        list_text = value.toString("HH:mm")
+        display_text = value.toString("HH:mm:ss")
+        index = combo.findText(list_text)
+        if index < 0:
+            index = self._nearest_half_hour_index(value)
+        combo.blockSignals(True)
+        if index >= 0 and index < combo.count():
+            combo.setCurrentIndex(index)
+            if combo.lineEdit() is not None:
+                combo.lineEdit().setText(display_text)
+        else:
+            combo.setCurrentText(display_text)
+        combo.blockSignals(False)
+
+    def _nearest_half_hour_index(self, value: QTime) -> int:
+        """取得最接近 30 分刻度的下拉索引（0..47）。"""
+        if not value.isValid():
+            return 0
+
+        total_minutes = value.hour() * 60 + value.minute()
+        quotient, remainder = divmod(total_minutes, 30)
+        if remainder >= 15:
+            quotient += 1
+
+        if quotient > 47:
+            quotient = 47
+        if quotient < 0:
+            quotient = 0
+        return quotient
+
+    def _normalize_time_combo_display(self, combo: QComboBox):
+        """將欄位顯示統一成 HH:mm:ss；不影響下拉項目仍為 HH:mm。"""
+        if combo.lineEdit() is None:
+            return
+        time_value = self._parse_combo_time(combo)
+        nearest_index = self._nearest_half_hour_index(time_value)
+        combo.blockSignals(True)
+        if 0 <= nearest_index < combo.count():
+            combo.setCurrentIndex(nearest_index)
+        combo.blockSignals(False)
+        combo.lineEdit().setText(time_value.toString("HH:mm:ss"))
+
+    def get_start_time(self) -> QTime:
+        return self._parse_combo_time(self.start_time_combo)
+
+    def set_start_time(self, value: QTime):
+        self._set_combo_time(self.start_time_combo, value)
+
+    def get_end_time(self) -> QTime:
+        return self._parse_combo_time(self.end_time_combo)
+
+    def set_end_time(self, value: QTime):
+        self._set_combo_time(self.end_time_combo, value)
 
     def update_duration_combo(self):
         """更新期間下拉選單"""
@@ -237,8 +508,12 @@ class RecurrenceDialog(QDialog):
     def connect_signals(self):
         """連接信號"""
         # 連接時間和期間的互動
-        self.start_time_edit.timeChanged.connect(self.on_start_time_changed)
-        self.end_time_edit.timeChanged.connect(self.on_end_time_changed)
+        self.start_time_combo.currentIndexChanged.connect(self.on_start_time_changed)
+        self.end_time_combo.currentIndexChanged.connect(self.on_end_time_changed)
+        if self.start_time_combo.lineEdit() is not None:
+            self.start_time_combo.lineEdit().editingFinished.connect(self.on_start_time_changed)
+        if self.end_time_combo.lineEdit() is not None:
+            self.end_time_combo.lineEdit().editingFinished.connect(self.on_end_time_changed)
         self.duration_combo.currentIndexChanged.connect(self.on_duration_changed)
         # 支援使用者直接在可編輯的 combo 中輸入自訂期間
         if self.duration_combo.isEditable() and self.duration_combo.lineEdit() is not None:
@@ -273,6 +548,7 @@ class RecurrenceDialog(QDialog):
 
             # 設置頻率
             freq = params.get("FREQ", "DAILY")
+            self.lunar_mode_checkbox.setChecked(params.get("X-LUNAR", "0") == "1")
             if freq == "DAILY":
                 self.radio_daily.setChecked(True)
             elif freq == "WEEKLY":
@@ -295,7 +571,16 @@ class RecurrenceDialog(QDialog):
                 self.yearly_interval.setValue(interval)
 
             # 設置開始日期（優先使用 RRULE 的 DTSTART）
-            if dtstart_raw and len(dtstart_raw) >= 8:
+            range_start_raw = params.get("X-RANGE-START", "")
+            if range_start_raw and len(range_start_raw) >= 8:
+                try:
+                    year = int(range_start_raw[:4])
+                    month = int(range_start_raw[4:6])
+                    day = int(range_start_raw[6:8])
+                    self.start_date_edit.setDate(QDate(year, month, day))
+                except (ValueError, IndexError):
+                    pass
+            elif dtstart_raw and len(dtstart_raw) >= 8:
                 try:
                     year = int(dtstart_raw[:4])
                     month = int(dtstart_raw[4:6])
@@ -326,7 +611,7 @@ class RecurrenceDialog(QDialog):
                 # 如果沒有 BYHOUR，使用預設時間 (上午9:00)
                 start_time = QTime(9, 0, 0)
             # 設置開始時間
-            self.start_time_edit.setTime(start_time)
+            self.set_start_time(start_time)
 
             # 設置期間（優先使用 DURATION）
             duration_minutes = self._parse_duration_minutes(params.get("DURATION", ""))
@@ -469,26 +754,28 @@ class RecurrenceDialog(QDialog):
 
         return hours * 60 + minutes
 
-    def on_start_time_changed(self, value):
+    def on_start_time_changed(self, value=None):
         """開始時間改變時更新結束時間"""
         if not hasattr(self, "_updating_times") or not self._updating_times:
             self._updating_times = True
             try:
-                start_time = self.start_time_edit.time()
+                start_time = self.get_start_time()
+                self._normalize_time_combo_display(self.start_time_combo)
                 duration_minutes = self.get_duration_minutes()
                 if duration_minutes is not None:
                     end_time = start_time.addSecs(duration_minutes * 60)
-                    self.end_time_edit.setTime(end_time)
+                    self.set_end_time(end_time)
             finally:
                 self._updating_times = False
 
-    def on_end_time_changed(self, value):
+    def on_end_time_changed(self, value=None):
         """結束時間改變時更新期間"""
         if not hasattr(self, "_updating_times") or not self._updating_times:
             self._updating_times = True
             try:
-                start_time = self.start_time_edit.time()
-                end_time = self.end_time_edit.time()
+                start_time = self.get_start_time()
+                end_time = self.get_end_time()
+                self._normalize_time_combo_display(self.end_time_combo)
                 duration_seconds = start_time.secsTo(end_time)
                 if duration_seconds < 0:
                     duration_seconds += 24 * 3600  # 跨日
@@ -517,9 +804,22 @@ class RecurrenceDialog(QDialog):
     def create_recurrence_pattern_group(self) -> QGroupBox:
         """建立循環模式區塊"""
         group = QGroupBox("循環模式")
-        layout = QHBoxLayout(group)
+        root_layout = QVBoxLayout(group)
+        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(12, 12, 12, 12)
+
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.setSpacing(6)
+        top_bar.addStretch()
+        self.lunar_mode_checkbox = QCheckBox("農曆")
+        self.lunar_mode_checkbox.setToolTip("勾選後，排程將以農曆規則計算觸發日期")
+        top_bar.addWidget(self.lunar_mode_checkbox)
+        root_layout.addLayout(top_bar)
+
+        layout = QHBoxLayout()
         layout.setSpacing(15)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         # 左側：頻率選擇
         left_widget = QWidget()
@@ -567,8 +867,31 @@ class RecurrenceDialog(QDialog):
         self.create_monthly_detail()
         self.create_yearly_detail()
 
+        self.lock_recurrence_detail_height()
+
         layout.addWidget(self.detail_widget, 1)
+        root_layout.addLayout(layout)
         return group
+
+    def lock_recurrence_detail_height(self):
+        """鎖定右側詳細設定高度，避免切換頻率時面板高度逐步增加。"""
+        if not hasattr(self, "detail_widget"):
+            return
+
+        detail_panels = []
+        for attr_name in ("daily_widget", "weekly_widget", "monthly_widget", "yearly_widget"):
+            panel = getattr(self, attr_name, None)
+            if panel is not None:
+                detail_panels.append(panel)
+
+        if not detail_panels:
+            return
+
+        max_height = max(panel.sizeHint().height() for panel in detail_panels)
+        if max_height <= 0:
+            return
+
+        self.detail_widget.setFixedHeight(max_height)
 
     def create_daily_detail(self):
         """建立每天選項的詳細設定"""
@@ -790,6 +1113,7 @@ class RecurrenceDialog(QDialog):
 
         # 選項 2: 於 X 月第 Y 個星期 Z
         week_layout = QHBoxLayout()
+        week_layout.setSpacing(10)
         self.radio_yearly_week = QRadioButton("於(E):")
         week_layout.addWidget(self.radio_yearly_week)
 
@@ -821,14 +1145,16 @@ class RecurrenceDialog(QDialog):
         self.yearly_week_num.addItems(
             ["第 1 個", "第 2 個", "第 3 個", "第 4 個", "最後 1 個"]
         )
-        self.yearly_week_num.setFixedWidth(100)
+        self.yearly_week_num.setFixedWidth(110)
+        self.yearly_week_num.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         week_layout.addWidget(self.yearly_week_num)
 
         self.yearly_week_day = QComboBox()
         self.yearly_week_day.addItems(
             ["週一到週五", "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]
         )
-        self.yearly_week_day.setFixedWidth(100)
+        self.yearly_week_day.setFixedWidth(130)
+        self.yearly_week_day.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         week_layout.addWidget(self.yearly_week_day)
 
         week_layout.addStretch()
@@ -848,10 +1174,9 @@ class RecurrenceDialog(QDialog):
         start_date_label = QLabel("開始(S):")
         start_date_label.setObjectName("fieldLabel")
         layout.addWidget(start_date_label, 0, 0)
-        self.start_date_edit = QDateEdit()
+        self.start_date_edit = PopupDateEdit()
         self.start_date_edit.setDisplayFormat("yyyy/M/d (ddd)")
         self.start_date_edit.setDate(self.initial_date or QDate.currentDate())
-        self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setFixedWidth(150)
         layout.addWidget(self.start_date_edit, 0, 1)
 
@@ -863,10 +1188,9 @@ class RecurrenceDialog(QDialog):
         self.end_button_group.addButton(self.radio_end_by)
         layout.addWidget(self.radio_end_by, 0, 2)
 
-        self.end_date_edit = QDateEdit()
+        self.end_date_edit = PopupDateEdit()
         self.end_date_edit.setDisplayFormat("yyyy/M/d (ddd)")
         self.end_date_edit.setDate(QDate.currentDate().addMonths(3))
-        self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setFixedWidth(150)
         layout.addWidget(self.end_date_edit, 0, 3)
 
@@ -954,7 +1278,7 @@ class RecurrenceDialog(QDialog):
         if not hasattr(self, "_updating_times") or not self._updating_times:
             self._updating_times = True
             try:
-                start_time = self.start_time_edit.time()
+                start_time = self.get_start_time()
                 duration_minutes = self.get_duration_minutes()
                 # 選取內建項目時，取消自訂旗標
                 if self.duration_combo.currentIndex() >= 0:
@@ -962,7 +1286,7 @@ class RecurrenceDialog(QDialog):
 
                 if duration_minutes is not None:
                     end_time = start_time.addSecs(duration_minutes * 60)
-                    self.end_time_edit.setTime(end_time)
+                    self.set_end_time(end_time)
             finally:
                 self._updating_times = False
 
@@ -1058,13 +1382,14 @@ class RecurrenceDialog(QDialog):
         count = 0
 
         # 取得時間
-        time = self.start_time_edit.time()
+        time = self.get_start_time()
         hour = time.hour()
         minute = time.minute()
 
         # 開始日期
         start_date = self.start_date_edit.date()
-        dtstart = f"{start_date.year()}{start_date.month():02d}{start_date.day():02d}T{hour:02d}{minute:02d}00"
+        dtstart_date = start_date
+        range_start = f"{start_date.year()}{start_date.month():02d}{start_date.day():02d}"
 
         # 期間
         duration_minutes = self.get_duration_minutes() or 30
@@ -1097,6 +1422,10 @@ class RecurrenceDialog(QDialog):
             if self.radio_monthly_day.isChecked():
                 interval = self.monthly_interval.value()
                 bymonthday = str(self.monthly_day.value())
+                safe_day = min(self.monthly_day.value(), QDate(start_date.year(), start_date.month(), 1).daysInMonth())
+                candidate = QDate(start_date.year(), start_date.month(), safe_day)
+                if candidate.isValid():
+                    dtstart_date = candidate
             else:
                 interval = self.monthly_week_interval.value()
                 week_num = self.monthly_week_num.currentIndex() + 1
@@ -1118,6 +1447,11 @@ class RecurrenceDialog(QDialog):
             if self.radio_yearly_date.isChecked():
                 bymonth = str(self.yearly_month.currentIndex() + 1)
                 bymonthday = str(self.yearly_day.value())
+                target_month = self.yearly_month.currentIndex() + 1
+                safe_day = min(self.yearly_day.value(), QDate(start_date.year(), target_month, 1).daysInMonth())
+                candidate = QDate(start_date.year(), target_month, safe_day)
+                if candidate.isValid():
+                    dtstart_date = candidate
             else:
                 bymonth = str(self.yearly_week_month.currentIndex() + 1)
                 week_num = self.yearly_week_num.currentIndex() + 1
@@ -1131,6 +1465,8 @@ class RecurrenceDialog(QDialog):
                     day_map = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"]
                     byday = day_map[day_index - 1]  # 減1因為第一個選項是週一到週五
                 bysetpos = str(week_num)
+
+        dtstart = f"{dtstart_date.year()}{dtstart_date.month():02d}{dtstart_date.day():02d}T{hour:02d}{minute:02d}00"
 
         # 結束條件
         if self.radio_end_never.isChecked():
@@ -1169,6 +1505,11 @@ class RecurrenceDialog(QDialog):
 
         if until:
             parts.append(f"UNTIL={until}")
+
+        if self.lunar_mode_checkbox.isChecked():
+            parts.append("X-LUNAR=1")
+
+        parts.append(f"X-RANGE-START={range_start}")
 
         parts.append(f"DTSTART:{dtstart}")
         parts.append(duration_str)
