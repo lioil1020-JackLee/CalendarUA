@@ -1,13 +1,13 @@
 # CalendarUA
 
-![主視窗 月視圖](image/主視窗 月視圖.png)
-![主視窗 週視圖](image/主視窗 週視圖.png)
-![主視窗 日視圖](image/主視窗 日視圖.png)
-![假日設定](image/假日設定.png)
-![排程設定頁](image/排程設定頁.png)
-![OPC UA 連線設定頁](image/OPC UA連線設定頁.png)
-![OPC UA 瀏覽頁](image/OPC UA瀏覽頁.png)
-![資料庫結構](image/資料庫結構.png)
+![主視窗 月視圖](image/main_month.png)
+![主視窗 週視圖](image/main_week.png)
+![主視窗 日視圖](image/main_day.png)
+![假日設定](image/holidays.png)
+![排程設定頁](image/schedules.png)
+![OPC UA 連線設定頁](image/opc_connect.png)
+![OPC UA 瀏覽頁](image/opc_browser.png)
+![資料庫結構](image/db_structure.png)
 
 CalendarUA 是一套以 `PySide6` 開發的 OPC UA 排程桌面工具，提供日/週/月行事曆視圖、RRULE 週期排程、例外與假日規則、以及 SQLite 本地資料庫。
 
