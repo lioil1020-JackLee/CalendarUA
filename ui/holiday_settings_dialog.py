@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from database.sqlite_manager import SQLiteManager
+from ui.combo_wheel_helper import attach_combo_wheel_behavior
 
 
 class HolidaySettingsDialog(QDialog):
@@ -57,6 +58,8 @@ class HolidaySettingsDialog(QDialog):
         import_export_layout = QHBoxLayout()
         self.btn_import = QPushButton("匯入假日 (csv)")
         self.btn_export = QPushButton("匯出假日 (csv)")
+        self.btn_import.setStyleSheet("border: 1px solid #7a7a7a;")
+        self.btn_export.setStyleSheet("border: 1px solid #7a7a7a;")
         import_export_layout.addWidget(self.btn_import)
         import_export_layout.addWidget(self.btn_export)
         import_export_layout.addStretch()
@@ -443,12 +446,56 @@ class HolidayRuleEditDialog(QDialog):
         self.btn_ok.clicked.connect(self.accept)
         self.btn_cancel.clicked.connect(self.reject)
 
+        attach_combo_wheel_behavior(self)
+
+        self._wheel_combo_targets: Dict[object, QComboBox] = {}
+        self._register_combo_wheel_targets()
+
         idx_calendar = self.combo_calendar_type.findData(calendar_type)
         self.combo_calendar_type.setCurrentIndex(max(0, idx_calendar))
 
         idx_month = self.combo_month.findData(month)
         self.combo_month.setCurrentIndex(max(0, idx_month))
         self._reload_day_combo(day)
+
+    def _register_combo_wheel_targets(self) -> None:
+        self._wheel_combo_targets.clear()
+        for combo in (self.combo_calendar_type, self.combo_month, self.combo_day):
+            self._wheel_combo_targets[combo] = combo
+            combo.installEventFilter(self)
+            line_edit = combo.lineEdit()
+            if line_edit is not None:
+                self._wheel_combo_targets[line_edit] = combo
+                line_edit.installEventFilter(self)
+            view = combo.view()
+            if view is not None:
+                self._wheel_combo_targets[view] = combo
+                self._wheel_combo_targets[view.viewport()] = combo
+                view.installEventFilter(self)
+                view.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel:
+            combo = self._wheel_combo_targets.get(obj)
+            if combo is not None and combo.isEnabled() and combo.count() > 0:
+                delta = event.angleDelta().y()
+                if delta != 0:
+                    steps = int(delta / 120)
+                    if steps == 0:
+                        steps = 1 if delta > 0 else -1
+                    current_index = combo.currentIndex()
+                    if current_index < 0:
+                        current_index = 0
+                    target_index = current_index - steps
+                    if target_index < 0:
+                        target_index = 0
+                    elif target_index >= combo.count():
+                        target_index = combo.count() - 1
+                    if target_index != combo.currentIndex():
+                        combo.setCurrentIndex(target_index)
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
 
     def _reload_day_combo(self, preferred_day: Optional[int] = None) -> None:
         if preferred_day is None:

@@ -33,6 +33,8 @@ class ScheduleTimeGridWidget(QWidget):
     def __init__(self, week_mode: bool, parent=None):
         super().__init__(parent)
         self.week_mode = week_mode
+        self._is_dark_theme: bool | None = None
+        self._fixed_row_height = 28
         self.time_scale_minutes = 60
         self.reference_date = QDate.currentDate()
         self.occurrences: List[ResolvedOccurrence] = []
@@ -41,13 +43,14 @@ class ScheduleTimeGridWidget(QWidget):
 
         self.table = QTableWidget(self._rows_per_day(), 7 if week_mode else 1)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionMode(QTableWidget.NoSelection)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         # 支援滑鼠左鍵雙擊：直接開啟編輯 / 新增視窗
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.verticalHeader().setDefaultSectionSize(self._fixed_row_height)
         self.table.verticalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.verticalHeader().customContextMenuRequested.connect(self._show_time_scale_menu)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -63,6 +66,7 @@ class ScheduleTimeGridWidget(QWidget):
         self.table.horizontalHeader().setFont(header_font)
 
         self._refresh_time_labels()
+        self.apply_theme_style()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -70,6 +74,68 @@ class ScheduleTimeGridWidget(QWidget):
 
         self._refresh_headers()
         self._ensure_items()
+        self._update_row_height_policy()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_row_height_policy()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_row_height_policy()
+
+    def relayout_to_viewport(self):
+        self._update_row_height_policy()
+
+    def _update_row_height_policy(self):
+        # 需求：time span 改變時格高與時間字體保持固定，不隨視窗縮放。
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.table.verticalHeader().setDefaultSectionSize(self._fixed_row_height)
+
+    def apply_theme_style(self, is_dark: bool | None = None):
+        if isinstance(is_dark, bool):
+            self._is_dark_theme = is_dark
+        is_dark_palette = self._is_dark_theme if isinstance(self._is_dark_theme, bool) else (self.palette().window().color().lightness() < 128)
+        if is_dark_palette:
+            self.table.setStyleSheet(
+                """
+                QTableWidget {
+                    background-color: #1e1e1e;
+                    color: #cccccc;
+                    gridline-color: #3d3d3d;
+                }
+                QTableWidget::item:selected {
+                    background-color: #2f73d9;
+                    color: #ffffff;
+                }
+                QHeaderView::section {
+                    background-color: #252526;
+                    color: #f0f0f0;
+                    border: 1px solid #3d3d3d;
+                    font-weight: 600;
+                }
+                """
+            )
+        else:
+            self.table.setStyleSheet(
+                """
+                QTableWidget {
+                    background-color: #ffffff;
+                    color: #111111;
+                    gridline-color: #e0e0e0;
+                }
+                QTableWidget::item:selected {
+                    background-color: #2f73d9;
+                    color: #ffffff;
+                }
+                QHeaderView::section {
+                    background-color: #f0f0f0;
+                    color: #111111;
+                    border: 1px solid #d0d0d0;
+                    font-weight: 600;
+                }
+                """
+            )
 
     def _rows_per_day(self) -> int:
         return (24 * 60) // self.time_scale_minutes
@@ -100,16 +166,19 @@ class ScheduleTimeGridWidget(QWidget):
         self._refresh_time_labels()
         self._ensure_items()
         self._render()
+        self._update_row_height_policy()
         self.time_scale_changed.emit(minutes)
 
     def set_reference_date(self, qdate: QDate):
         self.reference_date = qdate
         self._refresh_headers()
         self._render()
+        self._update_row_height_policy()
 
     def set_occurrences(self, occurrences: List[ResolvedOccurrence]):
         self.occurrences = occurrences
         self._render()
+        self._update_row_height_policy()
 
     def _refresh_headers(self):
         if not self.week_mode:
@@ -153,14 +222,17 @@ class ScheduleTimeGridWidget(QWidget):
     def _clear_grid(self):
         self._cell_occurrence_map.clear()
         self._cell_start_titles.clear()
+        is_dark_palette = self._is_dark_theme if isinstance(self._is_dark_theme, bool) else (self.palette().window().color().lightness() < 128)
+        empty_bg = QColor("#1e1e1e") if is_dark_palette else QColor("#ffffff")
+        empty_fg = QColor("#cccccc") if is_dark_palette else QColor("#000000")
         for row in range(self.table.rowCount()):
             for col in range(self.table.columnCount()):
                 item = self.table.item(row, col)
                 if item is None:
                     continue
                 item.setText("")
-                item.setBackground(QColor("#ffffff"))
-                item.setForeground(QColor("#000000"))
+                item.setBackground(empty_bg)
+                item.setForeground(empty_fg)
                 item.setToolTip("")
 
     def _column_for_date(self, dt: datetime) -> int:
@@ -223,8 +295,8 @@ class ScheduleTimeGridWidget(QWidget):
             item.setBackground(QColor(occ.category_bg))
             item.setForeground(QColor(occ.category_fg))
         else:
-            # 同一時間格有多筆任務時，仍使用統一紅底白字
-            item.setBackground(QColor("#ff1a1a"))
+            # 同一時間格有多筆任務時，使用統一藍底白字
+            item.setBackground(QColor("#2f73d9"))
             item.setForeground(QColor("#ffffff"))
 
         tooltip_lines = []

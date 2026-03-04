@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QToolButton,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QLocale, QTime, QEvent
-from PySide6.QtGui import QAction, QIcon, QFont
+from PySide6.QtGui import QAction, QIcon, QFont, QColor, QGuiApplication
 import qasync
 import re
 from datetime import date as dt_date
@@ -61,6 +61,7 @@ from core.schedule_resolver import resolve_occurrences_for_range
 from ui.recurrence_dialog import RecurrenceDialog
 from ui.database_settings_dialog import DatabaseSettingsDialog
 from ui.holiday_settings_dialog import HolidaySettingsDialog
+from ui.combo_wheel_helper import attach_combo_wheel_behavior
 from ui.schedule_canvas import DayViewWidget, WeekViewWidget
 from ui.month_grid import MonthViewWidget
 from core.lunar_calendar import to_lunar, LunarDateInfo
@@ -140,6 +141,8 @@ class NavCalendarWidget(QCalendarWidget):
         super().__init__(parent)
         self.role = role  # "top" or "bottom"
         self._forced_selected_date: QDate | None = None  # 自行管理的選取日期
+        self._holiday_checker = None
+        self._is_dark_theme = False
 
         # 使用 Qt 內建 clicked(QDate) 訊號，不再自己做 hit-test
         self.clicked.connect(self._on_qt_clicked)
@@ -156,6 +159,25 @@ class NavCalendarWidget(QCalendarWidget):
         """由外部設定目前選取日期（兩個小月曆共用同一個選取日期）"""
         self._forced_selected_date = date
         self.update()
+
+    def set_holiday_checker(self, checker):
+        """設定假日判斷函式，簽章為 checker(QDate) -> bool。"""
+        self._holiday_checker = checker
+        self.update()
+
+    def set_theme_dark(self, is_dark: bool):
+        self._is_dark_theme = bool(is_dark)
+        self.update()
+
+    def _is_holiday(self, date: QDate) -> bool:
+        if date.dayOfWeek() in (6, 7):
+            return True
+        if self._holiday_checker is None:
+            return False
+        try:
+            return bool(self._holiday_checker(date))
+        except Exception:
+            return False
 
     def _on_qt_clicked(self, clicked: QDate):
         """由 Qt 傳入正確的 clicked 日期，再套用我們的隱藏/跨月規則。"""
@@ -208,7 +230,8 @@ class NavCalendarWidget(QCalendarWidget):
 
         painter.save()
         # 底色
-        painter.fillRect(rect, self.palette().base())
+        cell_bg = QColor("#2b2b2b") if self._is_dark_theme else QColor("#ffffff")
+        painter.fillRect(rect, cell_bg)
 
         # 決定這格是否完全不顯示（空白）
         hide = False
@@ -217,7 +240,7 @@ class NavCalendarWidget(QCalendarWidget):
         if self.role == "bottom" and is_prev:
             hide = True      # 下方隱藏「上個月」交界格
 
-        from PySide6.QtGui import QColor
+        is_dark_palette = self._is_dark_theme
 
         lunar_text = ""
         try:
@@ -229,13 +252,17 @@ class NavCalendarWidget(QCalendarWidget):
 
         if not hide:
             # 本月白字、前後月灰字
+            is_holiday = self._is_holiday(date)
             if is_this:
-                fg = QColor("#f0f0f0")
+                if is_holiday:
+                    day_fg = QColor("#c62828")
+                else:
+                    day_fg = QColor("#f0f0f0") if is_dark_palette else QColor("#202020")
             else:
-                fg = QColor("#808080")
+                day_fg = QColor("#b36b6b") if is_holiday else QColor("#808080")
 
             # 上方：國曆（較大）
-            painter.setPen(fg)
+            painter.setPen(day_fg)
             solar_font = QFont(painter.font())
             solar_font.setFamily("Segoe UI")
             solar_font.setBold(True)
@@ -256,7 +283,7 @@ class NavCalendarWidget(QCalendarWidget):
 
             # 今日標記（左側小月曆永久保留一個 today 高亮）
             if date == QDate.currentDate():
-                today_pen = QColor("#f4c542")
+                today_pen = QColor("#ff8f00")
                 painter.setPen(today_pen)
                 painter.setBrush(Qt.NoBrush)
                 today_rect = rect.adjusted(3, 3, -3, -3)
@@ -264,12 +291,20 @@ class NavCalendarWidget(QCalendarWidget):
 
         # 畫選取高亮（兩個小月曆共用同一個選取日期；但隱藏格不畫）
         if (not hide) and self._forced_selected_date and date == self._forced_selected_date:
-            sel = QColor("#0078d7")
+            sel = QColor("#0078d7") if is_dark_palette else QColor("#9ec6f3")
             painter.setPen(Qt.NoPen)
             painter.setBrush(sel)
             r = rect.adjusted(2, 2, -2, -2)
             painter.drawRect(r)
-            painter.setPen(QColor("#ffffff"))
+            is_holiday = self._is_holiday(date)
+            if is_this:
+                if is_holiday:
+                    selected_day_fg = QColor("#c62828")
+                else:
+                    selected_day_fg = QColor("#f0f0f0") if is_dark_palette else QColor("#202020")
+            else:
+                selected_day_fg = QColor("#b36b6b") if is_holiday else QColor("#808080")
+            painter.setPen(selected_day_fg)
 
             solar_font = QFont(painter.font())
             solar_font.setFamily("Segoe UI")
@@ -331,6 +366,16 @@ class YearNavComboBox(QComboBox):
         if steps != 0:
             self.year_step_requested.emit(steps)
         event.accept()
+
+
+def _combo_steps_from_wheel(event) -> int:
+    delta = event.angleDelta().y()
+    if delta == 0:
+        return 0
+    steps = int(delta / 120)
+    if steps == 0:
+        steps = 1 if delta > 0 else -1
+    return steps
 
 
 class SchedulerWorker(QThread):
@@ -464,8 +509,10 @@ class CalendarUA(QMainWindow):
 
         # 主題模式: "light", "dark", "system"
         self.current_theme = "system"
+        self._allow_minimize_to_tray = False
 
         self.setup_ui()
+        attach_combo_wheel_behavior(self)
         self.apply_modern_style()
         self.setup_connections()
         self.setup_system_tray()
@@ -475,12 +522,17 @@ class CalendarUA(QMainWindow):
 
         # 設定系統主題監聽
         self.setup_theme_listener()
+        QTimer.singleShot(1200, self._enable_minimize_to_tray)
+
+    def _enable_minimize_to_tray(self):
+        self._allow_minimize_to_tray = True
 
     def setup_ui(self):
         """設定使用者介面"""
         self.setWindowTitle("CalendarUA")
         self.setWindowIcon(get_app_icon())
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(1100, 760)
+        self.resize(1320, 840)
 
         # 建立中央widget
         central_widget = QWidget()
@@ -538,6 +590,26 @@ class CalendarUA(QMainWindow):
 
         self.combo_nav_month = QComboBox()
         self.combo_nav_year = YearNavComboBox()
+        self.combo_nav_month.setEditable(True)
+        self.combo_nav_year.setEditable(True)
+        if self.combo_nav_month.lineEdit() is not None:
+            self.combo_nav_month.lineEdit().setReadOnly(True)
+            self.combo_nav_month.lineEdit().setAlignment(Qt.AlignCenter)
+            self.combo_nav_month.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.combo_nav_month.lineEdit().installEventFilter(self)
+        if self.combo_nav_year.lineEdit() is not None:
+            self.combo_nav_year.lineEdit().setReadOnly(True)
+            self.combo_nav_year.lineEdit().setAlignment(Qt.AlignCenter)
+            self.combo_nav_year.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.combo_nav_year.lineEdit().installEventFilter(self)
+        self.combo_nav_month.installEventFilter(self)
+        self.combo_nav_year.installEventFilter(self)
+        self.combo_nav_month.setMaxVisibleItems(12)
+        self.combo_nav_year.setMaxVisibleItems(11)
+        self.combo_nav_month.view().setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.combo_nav_month.view().setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.combo_nav_year.view().setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.combo_nav_year.view().setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # 下拉箭頭隱藏後，可用較緊湊寬度並避免與右箭頭重疊
         self.combo_nav_month.setFixedWidth(64)
         # 年度需要完整顯示四位數
@@ -547,6 +619,19 @@ class CalendarUA(QMainWindow):
                 font-family: 'Segoe UI';
                 font-size: 16px;
                 padding-right: 2px;
+            }
+            QComboBox QAbstractItemView {
+                text-align: center;
+                outline: 0;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 24px;
+            }
+            QComboBox QAbstractItemView QScrollBar:vertical {
+                width: 0px;
+            }
+            QComboBox QAbstractItemView QScrollBar:horizontal {
+                height: 0px;
             }
             QComboBox::drop-down {
                 subcontrol-origin: padding;
@@ -603,40 +688,13 @@ class CalendarUA(QMainWindow):
         self.nav_calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.nav_calendar.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
         self.nav_calendar.setFixedWidth(236)
-        # 統一週一~週日表頭底色，與下方預覽一致
-        self.nav_calendar.setStyleSheet(
-            """
-            QCalendarWidget QWidget {
-                background-color: #2b2b2b;
-                color: #f0f0f0;
-            }
-            QCalendarWidget QAbstractItemView:enabled {
-                selection-background-color: #0078d7;
-                selection-color: #ffffff;
-                background-color: #2b2b2b;
-                color: #f0f0f0;
-            }
-            QCalendarWidget QToolButton {
-                color: #f0f0f0;
-                background-color: transparent;
-                border: none;
-            }
-            QCalendarWidget QTableView QHeaderView::section {
-                background-color: #363636;
-                color: #f0f0f0;
-                font-weight: 600;
-            }
-            """
-        )
         self.nav_calendar.setNavigationBarVisible(False)
         left_layout.addWidget(self.nav_calendar)
 
         # 左下標題：顯示下一個月的「年 / 月」文字（不使用下拉）
         self.label_nav_next_header = QLabel("")
         self.label_nav_next_header.setAlignment(Qt.AlignCenter)
-        self.label_nav_next_header.setStyleSheet(
-            "font-family: 'Segoe UI'; font-size: 16px; font-weight: 600; color: #f0f0f0;"
-        )
+        self.label_nav_next_header.setStyleSheet("font-family: 'Segoe UI'; font-size: 16px; font-weight: 600;")
         left_layout.addWidget(self.label_nav_next_header)
 
         # 左下：下一個月預覽（僅顯示）
@@ -647,8 +705,6 @@ class CalendarUA(QMainWindow):
         self.nav_calendar_next.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.nav_calendar_next.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
         self.nav_calendar_next.setFixedWidth(236)
-        # 保持啟用狀態，才能正確套用每一天的文字格式；不接任何訊號，因此點擊不會影響主程式
-        self.nav_calendar_next.setStyleSheet(self.nav_calendar.styleSheet())
         self.nav_calendar_next.setNavigationBarVisible(False)
         left_layout.addWidget(self.nav_calendar_next)
 
@@ -712,6 +768,7 @@ class CalendarUA(QMainWindow):
         self.day_view = DayViewWidget()
         self.week_view = WeekViewWidget()
         self.month_view = MonthViewWidget()
+        self.month_view.set_holiday_checker(self._is_holiday_qdate)
         self.schedule_list_view = QTreeWidget()
         self.schedule_list_view.setColumnCount(2)
         self.schedule_list_view.setHeaderLabels(["欄位", "內容"])
@@ -736,6 +793,8 @@ class CalendarUA(QMainWindow):
         # 訊號連接
         self.nav_calendar.date_clicked.connect(self.on_nav_calendar_date_clicked)
         self.nav_calendar_next.date_clicked.connect(self.on_nav_calendar_date_clicked)
+        self.nav_calendar.set_holiday_checker(self._is_holiday_qdate)
+        self.nav_calendar_next.set_holiday_checker(self._is_holiday_qdate)
         self.btn_nav_prev.clicked.connect(lambda: self._shift_nav_month(-1))
         self.btn_nav_next.clicked.connect(lambda: self._shift_nav_month(1))
         self.combo_nav_month.currentIndexChanged.connect(self._on_nav_combo_changed)
@@ -930,7 +989,93 @@ class CalendarUA(QMainWindow):
         else:
             self._apply_light_theme()
 
+        self._apply_nav_calendar_theme(is_dark)
         self._apply_view_toolbar_button_style(is_dark)
+        if hasattr(self, "day_view"):
+            self.day_view.apply_theme_style(is_dark)
+        if hasattr(self, "week_view"):
+            self.week_view.apply_theme_style(is_dark)
+        self._refresh_theme_sensitive_views()
+
+    def _refresh_theme_sensitive_views(self):
+        """主題切換後，立即刷新自繪與依 palette 上色的內容。"""
+        if hasattr(self, "nav_calendar"):
+            self.nav_calendar.update()
+        if hasattr(self, "nav_calendar_next"):
+            self.nav_calendar_next.update()
+        if hasattr(self, "day_view"):
+            self.day_view.update()
+            self.day_view.table.viewport().update()
+        if hasattr(self, "week_view"):
+            self.week_view.update()
+            self.week_view.table.viewport().update()
+        if hasattr(self, "month_view"):
+            self.month_view.update()
+
+        QTimer.singleShot(0, self._refresh_main_calendar_views)
+
+    def _apply_nav_calendar_theme(self, is_dark: bool):
+        """套用左側上下小月曆樣式（含週標字色）。"""
+        weekday_color = "#ffffff" if is_dark else "#000000"
+        body_color = "#f0f0f0" if is_dark else "#111111"
+        header_bg = "#363636" if is_dark else "#e6e6e6"
+        calendar_bg = "#2b2b2b" if is_dark else "#ffffff"
+        selected_bg = "#0078d7" if is_dark else "#9ec6f3"
+        selected_fg = "#ffffff" if is_dark else "#0f1f33"
+        calendar_border = "#3d3d3d" if is_dark else "transparent"
+
+        calendar_style = f"""
+            QCalendarWidget {{
+                border: 1px solid {calendar_border};
+            }}
+            QCalendarWidget QWidget {{
+                background-color: {calendar_bg};
+                color: {body_color};
+            }}
+            QCalendarWidget QAbstractItemView:enabled {{
+                selection-background-color: {selected_bg};
+                selection-color: {selected_fg};
+                background-color: {calendar_bg};
+                color: {body_color};
+                border: 1px solid {calendar_border};
+            }}
+            QCalendarWidget QTableView {{
+                border: 1px solid {calendar_border};
+            }}
+            QCalendarWidget QToolButton {{
+                color: {body_color};
+                background-color: transparent;
+                border: none;
+            }}
+            QCalendarWidget QTableView QHeaderView::section {{
+                background-color: {header_bg};
+                color: {weekday_color};
+                font-weight: 600;
+            }}
+        """
+
+        self.nav_calendar.setStyleSheet(calendar_style)
+        self.nav_calendar_next.setStyleSheet(calendar_style)
+        if isinstance(self.nav_calendar, NavCalendarWidget):
+            self.nav_calendar.set_theme_dark(is_dark)
+        if isinstance(self.nav_calendar_next, NavCalendarWidget):
+            self.nav_calendar_next.set_theme_dark(is_dark)
+        weekday_fmt = self.nav_calendar.weekdayTextFormat(Qt.Monday)
+        weekday_fmt.setForeground(QColor(weekday_color))
+        for day in (
+            Qt.Sunday,
+            Qt.Monday,
+            Qt.Tuesday,
+            Qt.Wednesday,
+            Qt.Thursday,
+            Qt.Friday,
+            Qt.Saturday,
+        ):
+            self.nav_calendar.setWeekdayTextFormat(day, weekday_fmt)
+            self.nav_calendar_next.setWeekdayTextFormat(day, weekday_fmt)
+        self.label_nav_next_header.setStyleSheet(
+            f"font-family: 'Segoe UI'; font-size: 16px; font-weight: 600; color: {weekday_color};"
+        )
 
     def _apply_view_toolbar_button_style(self, is_dark: bool):
         """套用右上角工具按鈕樣式：日/週/月可高亮。"""
@@ -952,9 +1097,9 @@ class CalendarUA(QMainWindow):
                     background-color: #3a4250;
                 }
                 QPushButton:checked {
-                    background-color: #0e639c;
+                    background-color: #2e7d32;
                     color: #ffffff;
-                    border: 1px solid #1177bb;
+                    border: 1px solid #3f9a45;
                 }
             """
         else:
@@ -969,12 +1114,12 @@ class CalendarUA(QMainWindow):
                     min-width: 48px;
                 }
                 QPushButton:hover {
-                    background-color: #dde2e7;
+                    background-color: #c7d4e2;
                 }
                 QPushButton:checked {
-                    background-color: #0078d4;
-                    color: #ffffff;
-                    border: 1px solid #106ebe;
+                    background-color: #66bb6a;
+                    color: #0e2b12;
+                    border: 1px solid #3f9a45;
                 }
             """
         self.btn_view_schedule_list.setStyleSheet(toggle_style)
@@ -982,14 +1127,52 @@ class CalendarUA(QMainWindow):
         self.btn_view_week.setStyleSheet(toggle_style)
         self.btn_view_month.setStyleSheet(toggle_style)
 
-        plain_style = toggle_style.replace("QPushButton:checked {", "QPushButton:pressed {")
-        self.btn_holiday_settings.setStyleSheet(plain_style)
+        if is_dark:
+            holiday_style = """
+                QPushButton {
+                    background-color: #0e639c;
+                    color: #ffffff;
+                    border: 1px solid #2a8ccd;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-weight: 600;
+                    min-width: 48px;
+                }
+                QPushButton:hover {
+                    background-color: #1f89cd;
+                }
+                QPushButton:pressed {
+                    background-color: #094771;
+                }
+            """
+        else:
+            holiday_style = """
+                QPushButton {
+                    background-color: #e9ecef;
+                    color: #2f2f2f;
+                    border: 1px solid #cfd3d7;
+                    border-radius: 4px;
+                    padding: 6px 14px;
+                    font-weight: 600;
+                    min-width: 48px;
+                }
+                QPushButton:hover {
+                    background-color: #c7d4e2;
+                }
+                QPushButton:pressed {
+                    background-color: #cfd6dd;
+                }
+            """
+        self.btn_holiday_settings.setStyleSheet(holiday_style)
 
     def _apply_light_theme(self):
         """套用亮色主題"""
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f5f5f5;
+            }
+            QWidget {
+                color: #222222;
             }
             QGroupBox {
                 font-weight: bold;
@@ -1007,19 +1190,19 @@ class CalendarUA(QMainWindow):
                 color: #2c3e50;
             }
             QPushButton {
-                background-color: #0078d4;
-                color: white;
-                border: none;
+                background-color: #e9ecef;
+                color: #111111;
+                border: 1px solid #9aa4ad;
                 border-radius: 4px;
                 padding: 8px 16px;
                 font-weight: bold;
                 min-width: 80px;
             }
             QPushButton:hover {
-                background-color: #106ebe;
+                background-color: #c7d4e2;
             }
             QPushButton:pressed {
-                background-color: #005a9e;
+                background-color: #cfd6dd;
             }
             QPushButton:disabled {
                 background-color: #cccccc;
@@ -1032,8 +1215,8 @@ class CalendarUA(QMainWindow):
                 gridline-color: #e0e0e0;
             }
             QTableWidget::item:selected {
-                background-color: #0078d4;
-                color: white;
+                background-color: #9ec6f3;
+                color: #0f1f33;
             }
             QHeaderView::section {
                 background-color: #f0f0f0;
@@ -1058,8 +1241,8 @@ class CalendarUA(QMainWindow):
                 border-bottom: 1px solid #d0d0d0;
             }
             QMenuBar::item:selected {
-                background-color: #0078d4;
-                color: white;
+                background-color: #9ec6f3;
+                color: #0f1f33;
             }
             QStatusBar {
                 background-color: #f0f0f0;
@@ -1102,6 +1285,28 @@ class CalendarUA(QMainWindow):
                 border: 2px solid #0e639c;
                 image: url(:/checkbox_check);
             }
+            QComboBox {
+                background-color: white;
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 6px;
+                color: #333;
+            }
+            QComboBox QAbstractItemView {
+                background-color: white;
+                color: #333;
+                selection-background-color: #9ec6f3;
+                selection-color: #0f1f33;
+            }
+            QComboBox::drop-down {
+                width: 0px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
         """)
 
     def _apply_dark_theme(self):
@@ -1128,14 +1333,14 @@ class CalendarUA(QMainWindow):
             QPushButton {
                 background-color: #0e639c;
                 color: white;
-                border: none;
+                border: 1px solid #2a8ccd;
                 border-radius: 4px;
                 padding: 8px 16px;
                 font-weight: bold;
                 min-width: 80px;
             }
             QPushButton:hover {
-                background-color: #1177bb;
+                background-color: #1f89cd;
             }
             QPushButton:pressed {
                 background-color: #094771;
@@ -1215,6 +1420,15 @@ class CalendarUA(QMainWindow):
                 border-radius: 4px;
                 padding: 6px;
                 color: #cccccc;
+            }
+            QComboBox::drop-down {
+                width: 0px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
             }
             QSpinBox {
                 background-color: #1e1e1e;
@@ -1329,6 +1543,38 @@ class CalendarUA(QMainWindow):
         """處理主題選擇改變"""
         theme_data = self.theme_combo.currentData()
         self.set_theme(theme_data)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            month_line = self.combo_nav_month.lineEdit() if hasattr(self, "combo_nav_month") else None
+            year_line = self.combo_nav_year.lineEdit() if hasattr(self, "combo_nav_year") else None
+            if watched in (self.combo_nav_month, month_line):
+                QTimer.singleShot(0, self.combo_nav_month.showPopup)
+                event.accept()
+                return True
+            if watched in (self.combo_nav_year, year_line):
+                QTimer.singleShot(0, self.combo_nav_year.showPopup)
+                event.accept()
+                return True
+
+        if event.type() == QEvent.Wheel:
+            month_line = self.combo_nav_month.lineEdit() if hasattr(self, "combo_nav_month") else None
+            if watched in (self.combo_nav_month, month_line):
+                steps = _combo_steps_from_wheel(event)
+                if steps != 0 and self.combo_nav_month.count() > 0:
+                    current_index = self.combo_nav_month.currentIndex()
+                    if current_index < 0:
+                        current_index = 0
+                    target_index = current_index - steps
+                    if target_index < 0:
+                        target_index = 0
+                    elif target_index >= self.combo_nav_month.count():
+                        target_index = self.combo_nav_month.count() - 1
+                    if target_index != self.combo_nav_month.currentIndex():
+                        self.combo_nav_month.setCurrentIndex(target_index)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     # ========= 主行事曆視圖相關 =========
 
@@ -1573,6 +1819,13 @@ class CalendarUA(QMainWindow):
         if not initial:
             self._refresh_main_calendar_views()
 
+        if mode == "day" and hasattr(self, "day_view"):
+            self.day_view.relayout_to_viewport()
+            QTimer.singleShot(0, self.day_view.relayout_to_viewport)
+        elif mode == "week" and hasattr(self, "week_view"):
+            self.week_view.relayout_to_viewport()
+            QTimer.singleShot(0, self.week_view.relayout_to_viewport)
+
     def _shift_main_range(self, delta: int):
         """
         主視窗上一段 / 下一段：
@@ -1658,15 +1911,32 @@ class CalendarUA(QMainWindow):
         # Day / Week / Month 視圖同步
         self.day_view.set_reference_date(self.reference_date)
         self.day_view.set_occurrences(occurrences)
+        self.day_view.relayout_to_viewport()
 
         self.week_view.set_reference_date(self.reference_date)
         self.week_view.set_occurrences(occurrences)
+        self.week_view.relayout_to_viewport()
 
         self.month_view.set_reference_date(
             QDate(self.reference_date.year(), self.reference_date.month(), 1)
         )
         self.month_view.set_selected_date(self.reference_date)
+        self.month_view.set_holiday_checker(self._is_holiday_qdate)
         self.month_view.set_occurrences(occurrences)
+
+    def _is_holiday_qdate(self, qdate: QDate) -> bool:
+        """判斷日期是否為假日（週末或假日設定）。"""
+        if qdate.dayOfWeek() in (6, 7):
+            return True
+
+        if not self.db_manager:
+            return False
+
+        try:
+            check_date = dt_date(qdate.year(), qdate.month(), qdate.day())
+            return bool(self.db_manager.is_holiday_on_date(check_date))
+        except Exception:
+            return False
 
     def _refresh_schedule_list_view(self):
         """更新右側排程參數清單視圖。"""
@@ -2856,19 +3126,44 @@ class CalendarUA(QMainWindow):
 
     def _minimize_to_tray(self):
         """將視窗最小化到系統托盤"""
+        if not self._allow_minimize_to_tray:
+            return
         if self.windowState() & Qt.WindowMinimized:
             self.hide()
             self.tray_icon.show()
             # 設定工具提示
             self.tray_icon.setToolTip("CalendarUA")
 
+    def force_show_on_screen(self):
+        """確保主視窗可見且落在目前螢幕可視範圍。"""
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.showNormal()
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(self.width(), available.width())
+            height = min(self.height(), available.height())
+            self.resize(width, height)
+
+            frame = self.frameGeometry()
+            frame.moveCenter(available.center())
+            self.move(frame.topLeft())
+
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
 
 class OPCNodeBrowserDialog(QDialog):
     """OPC UA 節點瀏覽對話框"""
 
-    def __init__(self, parent=None, opc_url: str = ""):
+    _last_selected_node_id: str = ""
+
+    def __init__(self, parent=None, opc_url: str = "", preferred_node_id: str = ""):
         super().__init__(parent)
         self.opc_url = opc_url
+        self.preferred_node_id = self._extract_plain_node_id(preferred_node_id)
         self.selected_node = ""
         self.opc_handler = None
         self.logger = logging.getLogger(__name__)
@@ -2876,6 +3171,62 @@ class OPCNodeBrowserDialog(QDialog):
         self.apply_style()
         # 自動連線並載入節點
         QTimer.singleShot(100, self.connect_and_load)
+
+    @staticmethod
+    def _extract_plain_node_id(raw_text: str) -> str:
+        if not raw_text:
+            return ""
+        text = str(raw_text).strip()
+        if not text:
+            return ""
+        if "|" in text:
+            parts = [part.strip() for part in text.split("|") if part.strip()]
+            for part in reversed(parts):
+                if part.startswith("ns="):
+                    return part
+            return parts[-1] if parts else ""
+        return text
+
+    def _iter_tree_items(self, parent_item=None):
+        if parent_item is None:
+            for i in range(self.tree_widget.topLevelItemCount()):
+                top = self.tree_widget.topLevelItem(i)
+                yield top
+                yield from self._iter_tree_items(top)
+            return
+
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            yield child
+            yield from self._iter_tree_items(child)
+
+    def _find_item_by_node_id(self, node_id: str):
+        target = self._extract_plain_node_id(node_id)
+        if not target:
+            return None
+        for item in self._iter_tree_items():
+            if item.text(1) == target:
+                return item
+        return None
+
+    def _expand_item_ancestors(self, item):
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+
+    def _restore_last_position(self):
+        target = self.preferred_node_id or self._last_selected_node_id
+        if not target:
+            return
+
+        item = self._find_item_by_node_id(target)
+        if item is None:
+            return
+
+        self._expand_item_ancestors(item)
+        self.tree_widget.setCurrentItem(item)
+        self.tree_widget.scrollToItem(item)
 
     def setup_ui(self):
         """設定介面"""
@@ -2985,11 +3336,27 @@ class OPCNodeBrowserDialog(QDialog):
                     font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: #1177bb;
+                    background-color: #1f89cd;
                 }
                 QPushButton:disabled {
                     background-color: #4a4a4a;
                     color: #808080;
+                }
+                QComboBox {
+                    border: 1px solid #3d3d3d;
+                    border-radius: 4px;
+                    padding: 6px;
+                    background-color: #1e1e1e;
+                    color: #cccccc;
+                }
+                QComboBox::drop-down {
+                    width: 0px;
+                    border: none;
+                }
+                QComboBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
                 }
             """)
         else:
@@ -3006,11 +3373,11 @@ class OPCNodeBrowserDialog(QDialog):
                     color: #333;
                 }
                 QTreeWidget::item:selected {
-                    background-color: #0078d4;
-                    color: white;
+                    background-color: #9ec6f3;
+                    color: #0f1f33;
                 }
                 QTreeWidget::item:hover {
-                    background-color: #e5f3ff;
+                    background-color: #cfe3f8;
                 }
                 QHeaderView::section {
                     background-color: #f0f0f0;
@@ -3020,19 +3387,35 @@ class OPCNodeBrowserDialog(QDialog):
                     font-weight: bold;
                 }
                 QPushButton {
-                    background-color: #0078d4;
-                    color: white;
+                    background-color: #e9ecef;
+                    color: #111111;
                     border: none;
                     border-radius: 4px;
                     padding: 8px 16px;
                     font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: #106ebe;
+                    background-color: #c7d4e2;
                 }
                 QPushButton:disabled {
                     background-color: #cccccc;
                     color: #888888;
+                }
+                QComboBox {
+                    border: 1px solid #d0d0d0;
+                    border-radius: 4px;
+                    padding: 6px;
+                    background-color: white;
+                    color: #333;
+                }
+                QComboBox::drop-down {
+                    width: 0px;
+                    border: none;
+                }
+                QComboBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
                 }
             """)
 
@@ -3100,6 +3483,7 @@ class OPCNodeBrowserDialog(QDialog):
                 await self._async_load_child_nodes(objects, root_item, depth=0)
 
             self.status_label.setText("已載入節點")
+            self._restore_last_position()
             # 確保樹狀元件正確更新
             self.tree_widget.viewport().update()
 
@@ -3193,6 +3577,7 @@ class OPCNodeBrowserDialog(QDialog):
             
             if can_write:
                 self.selected_node = f"{display_name}|{node_id}|{data_type}"
+                OPCNodeBrowserDialog._last_selected_node_id = node_id
                 self.select_btn.setEnabled(True)
                 self.status_label.setText("已選擇可寫入節點")
                 self.status_label.setStyleSheet("color: green;")
@@ -3215,6 +3600,7 @@ class OPCNodeBrowserDialog(QDialog):
         
         if can_write:
             self.selected_node = f"{display_name}|{node_id}|{data_type}"
+            OPCNodeBrowserDialog._last_selected_node_id = node_id
             self.accept()
         else:
             self.status_label.setText("無法選擇唯讀節點")
@@ -3228,6 +3614,139 @@ class OPCNodeBrowserDialog(QDialog):
 class OPCSettingsDialog(QDialog):
     """OPC UA 設定對話框"""
 
+    class StepNumberComboBox(QComboBox):
+        """數值下拉：支援滾輪，逐格切換下拉選單數值。"""
+
+        def __init__(self, minimum: int, maximum: int, step: int = 1, parent=None):
+            super().__init__(parent)
+            self._minimum = minimum
+            self._maximum = max(minimum, maximum)
+            self._step = max(1, step)
+            self._window_size = 10
+            self._current_value = self._minimum
+
+            self.setEditable(True)
+            self.setInsertPolicy(QComboBox.NoInsert)
+            self.setMaxVisibleItems(self._window_size)
+
+            if self.lineEdit() is not None:
+                self.lineEdit().setReadOnly(True)
+                self.lineEdit().setAlignment(Qt.AlignCenter)
+                self.lineEdit().setCursor(Qt.PointingHandCursor)
+                self.lineEdit().installEventFilter(self)
+
+            self.setCursor(Qt.PointingHandCursor)
+            self.installEventFilter(self)
+            self.view().installEventFilter(self)
+            self.view().viewport().installEventFilter(self)
+
+            self._rebuild_window(self._current_value)
+
+        def value(self) -> int:
+            data = self.currentData()
+            if isinstance(data, int):
+                return data
+            try:
+                return int(self.currentText().strip())
+            except Exception:
+                return self._current_value
+
+        def setValue(self, value: int):
+            if value < self._minimum:
+                value = self._minimum
+            if value > self._maximum:
+                value = self._maximum
+            self._current_value = value
+
+            idx = self.findData(value)
+            if idx < 0:
+                self._rebuild_window(value)
+                idx = self.findData(value)
+
+            if idx >= 0:
+                self.blockSignals(True)
+                self.setCurrentIndex(idx)
+                self.blockSignals(False)
+
+        def _set_window(self, center_value: int, selected_value: int | None = None):
+            half = self._window_size // 2
+            start = center_value - half
+            if start < self._minimum:
+                start = self._minimum
+
+            end = start + self._window_size - 1
+            if end > self._maximum:
+                end = self._maximum
+                start = max(self._minimum, end - self._window_size + 1)
+
+            target_value = selected_value if isinstance(selected_value, int) else center_value
+            if target_value < start:
+                target_value = start
+            elif target_value > end:
+                target_value = end
+
+            values = list(range(start, end + 1))
+            if not values:
+                values = [center_value]
+
+            self.blockSignals(True)
+            self.clear()
+            for n in values:
+                self.addItem(str(n), n)
+
+            idx = self.findData(target_value)
+            if idx >= 0:
+                self.setCurrentIndex(idx)
+            self.blockSignals(False)
+            self._current_value = self.value()
+
+        def _rebuild_window(self, center_value: int):
+            self._set_window(center_value, center_value)
+
+        def _steps_from_wheel(self, event) -> int:
+            delta = event.angleDelta().y()
+            if delta == 0:
+                return 0
+            steps = int(delta / 120)
+            if steps == 0:
+                steps = 1 if delta > 0 else -1
+            # 對齊主畫面 2026 行為：下滾增加、上滾減少
+            return -steps
+
+        def _shift_window_by_steps(self, steps: int):
+            if steps == 0:
+                return
+
+            center_idx = min(self._window_size // 2, max(0, self.count() - 1))
+            center_value = self.itemData(center_idx)
+            if not isinstance(center_value, int):
+                center_value = self.value()
+
+            selected_value = self.value()
+            self._set_window(center_value + steps, selected_value)
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                line_edit = self.lineEdit()
+                if obj in (self, line_edit):
+                    QTimer.singleShot(0, self.showPopup)
+                    event.accept()
+                    return True
+
+            if obj in (self, self.view(), self.view().viewport()) and event.type() == QEvent.Wheel:
+                steps = self._steps_from_wheel(event)
+                self._shift_window_by_steps(steps)
+                event.accept()
+                return True
+
+            if obj is self.lineEdit() and event.type() == QEvent.Wheel:
+                steps = self._steps_from_wheel(event)
+                self._shift_window_by_steps(steps)
+                event.accept()
+                return True
+
+            return super().eventFilter(obj, event)
+
     def __init__(self, parent=None, security_policy="None", username="", password="", timeout=5, write_timeout=3, security_mode="None", opc_url: str = ""):
         super().__init__(parent)
         self.security_policy = security_policy
@@ -3240,6 +3759,7 @@ class OPCSettingsDialog(QDialog):
         self._detected_supported = None
         
         self.setup_ui()
+        attach_combo_wheel_behavior(self)
         
         # 連接信號
         self.chk_show_supported.toggled.connect(self.on_chk_show_supported_toggled)
@@ -3396,14 +3916,12 @@ class OPCSettingsDialog(QDialog):
         connection_layout.setContentsMargins(10, 8, 10, 8)
         connection_layout.setSpacing(8)
         connection_layout.addWidget(QLabel("連線超時 (秒):"))
-        self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(1, 300)
+        self.timeout_spin = OPCSettingsDialog.StepNumberComboBox(1, 300, step=1)
         self.timeout_spin.setValue(5)
         self.timeout_spin.setFixedWidth(80)
         connection_layout.addWidget(self.timeout_spin)
         connection_layout.addWidget(QLabel("寫值重試延遲 (秒):"))
-        self.write_timeout_spin = QSpinBox()
-        self.write_timeout_spin.setRange(1, 60)
+        self.write_timeout_spin = OPCSettingsDialog.StepNumberComboBox(1, 60, step=1)
         self.write_timeout_spin.setValue(3)
         self.write_timeout_spin.setFixedWidth(80)
         connection_layout.addWidget(self.write_timeout_spin)
@@ -3453,15 +3971,31 @@ class OPCSettingsDialog(QDialog):
                 color: #333;
             }
             QPushButton {
-                background-color: #0078d4;
-                color: white;
+                background-color: #e9ecef;
+                color: #111111;
                 border: none;
                 border-radius: 4px;
                 padding: 8px 16px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #106ebe;
+                background-color: #c7d4e2;
+            }
+            QComboBox {
+                border: 1px solid #d0d0d0;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: white;
+                color: #333;
+            }
+            QComboBox::drop-down {
+                width: 0px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
             }
             QLineEdit {
                 border: 1px solid #d0d0d0;
@@ -3551,7 +4085,23 @@ class OPCSettingsDialog(QDialog):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #1177bb;
+                background-color: #1f89cd;
+            }
+            QComboBox {
+                border: 1px solid #3d3d3d;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: #1e1e1e;
+                color: #cccccc;
+            }
+            QComboBox::drop-down {
+                width: 0px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
             }
             QLineEdit {
                 border: 1px solid #3d3d3d;
@@ -4149,15 +4699,15 @@ class ScheduleEditDialog(QDialog):
                 color: #333;
             }
             QPushButton {
-                background-color: #0078d4;
-                color: white;
+                background-color: #e9ecef;
+                color: #111111;
                 border: none;
                 border-radius: 4px;
                 padding: 8px 16px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #106ebe;
+                background-color: #c7d4e2;
             }
             QLineEdit {
                 border: 1px solid #d0d0d0;
@@ -4237,7 +4787,7 @@ class ScheduleEditDialog(QDialog):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #1177bb;
+                background-color: #1f89cd;
             }
             QLineEdit {
                 border: 1px solid #3d3d3d;
@@ -4430,7 +4980,7 @@ class ScheduleEditDialog(QDialog):
             return
 
         # 開啟節點瀏覽對話框
-        dialog = OPCNodeBrowserDialog(self, opc_url)
+        dialog = OPCNodeBrowserDialog(self, opc_url, self.node_id_edit.text().strip())
         if dialog.exec() == QDialog.Accepted:
             selected_node = dialog.get_selected_node()
             if selected_node:
@@ -4516,6 +5066,8 @@ def main():
     # 建立主視窗
     window = CalendarUA()
     window.show()
+    QTimer.singleShot(0, window.force_show_on_screen)
+    QTimer.singleShot(300, window.force_show_on_screen)
 
     # 執行事件迴圈
     with loop:

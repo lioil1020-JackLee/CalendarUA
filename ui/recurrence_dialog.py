@@ -27,10 +27,14 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
 )
-from PySide6.QtCore import Qt, QDate, QTime, Signal, QEvent, QSize, QLocale, QPoint
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import Qt, QDate, QTime, Signal, QEvent, QSize, QLocale, QPoint, QTimer
+from PySide6.QtGui import QFont, QIcon, QColor
 import sys
 import os
+from datetime import date as dt_date
+
+from core.lunar_calendar import to_lunar
+from ui.combo_wheel_helper import attach_combo_wheel_behavior
 
 
 def get_app_icon():
@@ -53,11 +57,58 @@ def get_app_icon():
     return QIcon()
 
 
+def _format_lunar_day_text(info) -> str:
+    n = info.lunar_day
+    chinese_ten = ["初", "十", "廿", "卅"]
+    numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+    if n <= 0 or n > 30:
+        return ""
+    if n == 1:
+        month_names = {
+            1: "元",
+            2: "二",
+            3: "三",
+            4: "四",
+            5: "五",
+            6: "六",
+            7: "七",
+            8: "八",
+            9: "九",
+            10: "十",
+            11: "十一",
+            12: "十二",
+        }
+        month_text = month_names.get(info.lunar_month, str(info.lunar_month))
+        leap_prefix = "閏" if info.is_leap_month else ""
+        return f"{leap_prefix}{month_text}月"
+    if n == 10:
+        return "初十"
+    if n == 20:
+        return "二十"
+    if n == 30:
+        return "三十"
+    ten = chinese_ten[(n - 1) // 10]
+    digit = numerals[(n - 1) % 10]
+    return f"{ten}{digit}"
+
+
+def _combo_steps_from_wheel(event) -> int:
+    delta = event.angleDelta().y()
+    if delta == 0:
+        return 0
+    steps = int(delta / 120)
+    if steps == 0:
+        steps = 1 if delta > 0 else -1
+    return steps
+
+
 class DropdownNavCalendar(QCalendarWidget):
     """自訂導覽列：上一月 / 年下拉 / 今日 / 月下拉 / 下一月。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._holiday_checker = None
+        self._is_dark_theme = False
         self.setNavigationBarVisible(False)
         self.setGridVisible(True)
         self.setFirstDayOfWeek(Qt.Sunday)
@@ -85,8 +136,61 @@ class DropdownNavCalendar(QCalendarWidget):
 
         self.combo_year = QComboBox(header_widget)
         self.combo_month = QComboBox(header_widget)
+        self.combo_year.setEditable(True)
+        self.combo_month.setEditable(True)
+        if self.combo_year.lineEdit() is not None:
+            self.combo_year.lineEdit().setReadOnly(True)
+            self.combo_year.lineEdit().setAlignment(Qt.AlignCenter)
+            self.combo_year.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.combo_year.lineEdit().installEventFilter(self)
+        if self.combo_month.lineEdit() is not None:
+            self.combo_month.lineEdit().setReadOnly(True)
+            self.combo_month.lineEdit().setAlignment(Qt.AlignCenter)
+            self.combo_month.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.combo_month.lineEdit().installEventFilter(self)
         self.combo_year.setFixedWidth(72)
         self.combo_month.setFixedWidth(60)
+        self.combo_year.setCursor(Qt.PointingHandCursor)
+        self.combo_month.setCursor(Qt.PointingHandCursor)
+        self.combo_year.setMaxVisibleItems(11)
+        self.combo_month.setMaxVisibleItems(12)
+        self.combo_year.view().setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.combo_year.view().setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.combo_month.view().setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.combo_month.view().setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.combo_year.setStyleSheet(
+            """
+            QComboBox {
+                font-family: 'Segoe UI';
+                font-size: 16px;
+                padding-right: 2px;
+            }
+            QComboBox QAbstractItemView {
+                text-align: center;
+                outline: 0;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 24px;
+            }
+            QComboBox QAbstractItemView QScrollBar:vertical {
+                width: 0px;
+            }
+            QComboBox QAbstractItemView QScrollBar:horizontal {
+                height: 0px;
+            }
+            QComboBox::drop-down {
+                width: 0px;
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+            """
+        )
+        self.combo_month.setStyleSheet(self.combo_year.styleSheet())
 
         self.btn_today = QToolButton(header_widget)
         self.btn_today.setText("●")
@@ -115,9 +219,135 @@ class DropdownNavCalendar(QCalendarWidget):
         self.combo_year.currentIndexChanged.connect(self._apply_page_from_nav)
         self.combo_month.currentIndexChanged.connect(self._apply_page_from_nav)
         self.currentPageChanged.connect(lambda _year, _month: self._sync_nav_from_page())
+        self.combo_month.installEventFilter(self)
+        self.combo_month.view().installEventFilter(self)
+        self.combo_month.view().viewport().installEventFilter(self)
         self.combo_year.installEventFilter(self)
         self.combo_year.view().installEventFilter(self)
         self.combo_year.view().viewport().installEventFilter(self)
+        self.apply_theme(False)
+
+    def apply_theme(self, is_dark: bool):
+        self._is_dark_theme = bool(is_dark)
+        weekday_color = "#ffffff" if is_dark else "#111111"
+        body_color = "#cccccc" if is_dark else "#111111"
+        header_bg = "#363636" if is_dark else "#e0e0e0"
+        calendar_bg = "#2b2b2b" if is_dark else "#ffffff"
+        selected_bg = "#0e639c" if is_dark else "#9ec6f3"
+        selected_fg = "#ffffff" if is_dark else "#0f1f33"
+        self.setStyleSheet(
+            f"""
+            QCalendarWidget QWidget {{
+                background-color: {calendar_bg};
+                color: {body_color};
+            }}
+            QCalendarWidget QAbstractItemView:enabled {{
+                background-color: {calendar_bg};
+                color: {body_color};
+                selection-background-color: {selected_bg};
+                selection-color: {selected_fg};
+            }}
+            QCalendarWidget QTableView QHeaderView::section {{
+                background-color: {header_bg};
+                color: {weekday_color};
+                font-weight: 600;
+            }}
+            QToolButton {{
+                color: {body_color};
+                background-color: transparent;
+                border: none;
+            }}
+            """
+        )
+        weekday_fmt = self.weekdayTextFormat(Qt.Monday)
+        weekday_fmt.setForeground(QColor(weekday_color))
+        for day in (
+            Qt.Sunday,
+            Qt.Monday,
+            Qt.Tuesday,
+            Qt.Wednesday,
+            Qt.Thursday,
+            Qt.Friday,
+            Qt.Saturday,
+        ):
+            self.setWeekdayTextFormat(day, weekday_fmt)
+
+    def set_holiday_checker(self, checker):
+        self._holiday_checker = checker
+        self.update()
+
+    def _is_holiday(self, date: QDate) -> bool:
+        if date.dayOfWeek() in (6, 7):
+            return True
+        if self._holiday_checker is None:
+            return False
+        try:
+            return bool(self._holiday_checker(date))
+        except Exception:
+            return False
+
+    def paintCell(self, painter, rect, date):
+        shown_year = self.yearShown()
+        shown_month = self.monthShown()
+        is_this = (date.year() == shown_year and date.month() == shown_month)
+
+        painter.save()
+        cell_bg = QColor("#2b2b2b") if self._is_dark_theme else QColor("#ffffff")
+        painter.fillRect(rect, cell_bg)
+
+        is_dark_palette = self.palette().window().color().lightness() < 128
+        is_holiday = self._is_holiday(date)
+
+        lunar_text = ""
+        try:
+            lunar_info = to_lunar(dt_date(date.year(), date.month(), date.day()))
+            if lunar_info:
+                lunar_text = _format_lunar_day_text(lunar_info)
+        except Exception:
+            lunar_text = ""
+
+        if is_this:
+            if is_holiday:
+                day_fg = QColor("#ff6b6b") if is_dark_palette else QColor("#c62828")
+            else:
+                day_fg = QColor("#f0f0f0") if is_dark_palette else QColor("#202020")
+        else:
+            day_fg = QColor("#b36b6b") if is_holiday else QColor("#808080")
+
+        # 今日框線
+        if date == QDate.currentDate():
+            today_pen = QColor("#ff8f00")
+            painter.setPen(today_pen)
+            painter.setBrush(Qt.NoBrush)
+            today_rect = rect.adjusted(3, 3, -3, -3)
+            painter.drawRect(today_rect)
+
+        if date == self.selectedDate():
+            sel = QColor("#0078d7") if is_dark_palette else QColor("#9ec6f3")
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(sel)
+            r = rect.adjusted(2, 2, -2, -2)
+            painter.drawRect(r)
+
+        painter.setPen(day_fg)
+        solar_font = QFont(painter.font())
+        solar_font.setFamily("Segoe UI")
+        solar_font.setBold(True)
+        solar_font.setPointSize(13)
+        painter.setFont(solar_font)
+        top_rect = rect.adjusted(0, 1, 0, -rect.height() // 2)
+        painter.drawText(top_rect, Qt.AlignHCenter | Qt.AlignVCenter, str(date.day()))
+
+        if lunar_text:
+            lunar_font = QFont(painter.font())
+            lunar_font.setFamily("Microsoft JhengHei")
+            lunar_font.setBold(False)
+            lunar_font.setPointSize(9)
+            painter.setFont(lunar_font)
+            bottom_rect = rect.adjusted(0, rect.height() // 2 - 1, 0, 0)
+            painter.drawText(bottom_rect, Qt.AlignHCenter | Qt.AlignVCenter, lunar_text)
+
+        painter.restore()
 
     def _init_nav_values(self):
         current_year = QDate.currentDate().year()
@@ -198,6 +428,18 @@ class DropdownNavCalendar(QCalendarWidget):
         self._set_year_window(center_year + steps, selected_year)
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            year_line = self.combo_year.lineEdit()
+            month_line = self.combo_month.lineEdit()
+            if obj in (self.combo_year, year_line):
+                QTimer.singleShot(0, self.combo_year.showPopup)
+                event.accept()
+                return True
+            if obj in (self.combo_month, month_line):
+                QTimer.singleShot(0, self.combo_month.showPopup)
+                event.accept()
+                return True
+
         if obj in (self.combo_year, self.combo_year.view(), self.combo_year.view().viewport()) and event.type() == QEvent.Wheel:
             delta = event.angleDelta().y()
             if delta != 0:
@@ -207,6 +449,23 @@ class DropdownNavCalendar(QCalendarWidget):
                 self._shift_year_window_by_steps(-steps)
             event.accept()
             return True
+
+        if obj in (self.combo_month, self.combo_month.view(), self.combo_month.view().viewport()) and event.type() == QEvent.Wheel:
+            steps = _combo_steps_from_wheel(event)
+            if steps != 0 and self.combo_month.count() > 0:
+                current_index = self.combo_month.currentIndex()
+                if current_index < 0:
+                    current_index = 0
+                target_index = current_index - steps
+                if target_index < 0:
+                    target_index = 0
+                elif target_index >= self.combo_month.count():
+                    target_index = self.combo_month.count() - 1
+                if target_index != self.combo_month.currentIndex():
+                    self.combo_month.setCurrentIndex(target_index)
+            event.accept()
+            return True
+
         return super().eventFilter(obj, event)
 
     def _apply_page_from_nav(self):
@@ -249,7 +508,7 @@ class PopupDateEdit(QDateEdit):
             self.lineEdit().installEventFilter(self)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if self.isEnabled() and event.button() == Qt.LeftButton:
             self._show_calendar_popup()
             event.accept()
             return
@@ -261,13 +520,15 @@ class PopupDateEdit(QDateEdit):
         return
 
     def eventFilter(self, obj, event):
-        if obj is self.lineEdit() and event.type() == QEvent.MouseButtonPress:
+        if self.isEnabled() and obj is self.lineEdit() and event.type() == QEvent.MouseButtonPress:
             self._show_calendar_popup()
             event.accept()
             return True
         return super().eventFilter(obj, event)
 
     def _show_calendar_popup(self):
+        if not self.isEnabled():
+            return
         calendar = self._calendar_popup
         if calendar is None:
             return
@@ -284,6 +545,144 @@ class PopupDateEdit(QDateEdit):
         calendar = self._calendar_popup
         if calendar is not None:
             calendar.hide()
+
+
+class RollingNumberComboBox(QComboBox):
+    """數值下拉（預設顯示 10 個值），支援滑鼠滾輪連續增加/減少。"""
+
+    def __init__(self, minimum: int = 1, maximum: int = 999, parent=None):
+        super().__init__(parent)
+        self._minimum = minimum
+        self._maximum = max(minimum, maximum)
+        self._window_size = 10
+        self._current_value = self._minimum
+
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setMaxVisibleItems(self._window_size)
+
+        if self.lineEdit() is not None:
+            self.lineEdit().setReadOnly(True)
+            self.lineEdit().setAlignment(Qt.AlignCenter)
+            self.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.lineEdit().installEventFilter(self)
+
+        self.setCursor(Qt.PointingHandCursor)
+        self.installEventFilter(self)
+        self.view().installEventFilter(self)
+        self.view().viewport().installEventFilter(self)
+
+        self._rebuild_window(self._current_value)
+
+    def setMinimum(self, value: int):
+        self._minimum = value
+        if self._maximum < self._minimum:
+            self._maximum = self._minimum
+        self.setValue(self._current_value)
+
+    def setMaximum(self, value: int):
+        self._maximum = max(self._minimum, value)
+        self.setValue(self._current_value)
+
+    def setRange(self, minimum: int, maximum: int):
+        self._minimum = minimum
+        self._maximum = max(minimum, maximum)
+        self.setValue(self._current_value)
+
+    def value(self) -> int:
+        data = self.currentData()
+        if isinstance(data, int):
+            return data
+        try:
+            return int(self.currentText().strip())
+        except Exception:
+            return self._current_value
+
+    def setValue(self, value: int):
+        if value < self._minimum:
+            value = self._minimum
+        if value > self._maximum:
+            value = self._maximum
+        self._current_value = value
+
+        idx = self.findData(value)
+        if idx < 0:
+            self._rebuild_window(value)
+            idx = self.findData(value)
+
+        if idx >= 0:
+            self.blockSignals(True)
+            self.setCurrentIndex(idx)
+            self.blockSignals(False)
+
+    def _set_window(self, center_value: int, selected_value: int | None = None):
+        total_count = self._maximum - self._minimum + 1
+        if total_count <= self._window_size:
+            start = self._minimum
+            end = self._maximum
+        else:
+            half = self._window_size // 2
+            start = center_value - half
+            if start < self._minimum:
+                start = self._minimum
+            end = start + self._window_size - 1
+            if end > self._maximum:
+                end = self._maximum
+                start = end - self._window_size + 1
+
+        target_value = selected_value if isinstance(selected_value, int) else center_value
+        if target_value < start:
+            target_value = start
+        elif target_value > end:
+            target_value = end
+
+        self.blockSignals(True)
+        self.clear()
+        for number in range(start, end + 1):
+            self.addItem(str(number), number)
+
+        idx = self.findData(target_value)
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+        self.blockSignals(False)
+        self._current_value = self.value()
+
+    def _rebuild_window(self, center_value: int):
+        self._set_window(center_value, center_value)
+
+    def _shift_window_by_steps(self, steps: int):
+        if steps == 0:
+            return
+
+        center_idx = min(self._window_size // 2, max(0, self.count() - 1))
+        center_value = self.itemData(center_idx)
+        if not isinstance(center_value, int):
+            center_value = self.value()
+
+        selected_value = self.value()
+        self._set_window(center_value - steps, selected_value)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            line_edit = self.lineEdit()
+            if obj in (self, line_edit):
+                QTimer.singleShot(0, self.showPopup)
+                event.accept()
+                return True
+
+        if obj in (self, self.view(), self.view().viewport()) and event.type() == QEvent.Wheel:
+            steps = _combo_steps_from_wheel(event)
+            self._shift_window_by_steps(steps)
+            event.accept()
+            return True
+
+        if obj is self.lineEdit() and event.type() == QEvent.Wheel:
+            steps = _combo_steps_from_wheel(event)
+            self._shift_window_by_steps(steps)
+            event.accept()
+            return True
+
+        return super().eventFilter(obj, event)
 
 
 class RecurrenceDialog(QDialog):
@@ -304,6 +703,7 @@ class RecurrenceDialog(QDialog):
         self.initial_date: QDate | None = initial_date
         self.initial_time: QTime | None = initial_time
         self.embedded = embedded
+        self._wheel_combo_targets: dict[object, QComboBox] = {}
 
         if not self.embedded:
             self.setWindowTitle("週期性約會")
@@ -315,7 +715,9 @@ class RecurrenceDialog(QDialog):
             self.setMinimumWidth(700)
 
         self.setup_ui()
+        attach_combo_wheel_behavior(self)
         self.apply_modern_style()
+        self._apply_popup_holiday_checkers()
         self.lock_recurrence_detail_height()
         self.connect_signals()
 
@@ -338,12 +740,42 @@ class RecurrenceDialog(QDialog):
         # 初始化時間同步：確保結束時間根據期間正確計算
         self.on_start_time_changed(None)
 
+    def _resolve_db_manager(self):
+        parent = self.parent()
+        if parent and hasattr(parent, "db_manager"):
+            return parent.db_manager
+        if parent and hasattr(parent, "parent"):
+            gp = parent.parent()
+            if gp and hasattr(gp, "db_manager"):
+                return gp.db_manager
+        return None
+
+    def _is_holiday_qdate(self, qdate: QDate) -> bool:
+        if qdate.dayOfWeek() in (6, 7):
+            return True
+        db_manager = self._resolve_db_manager()
+        if db_manager is None:
+            return False
+        try:
+            return bool(db_manager.is_holiday_on_date(dt_date(qdate.year(), qdate.month(), qdate.day())))
+        except Exception:
+            return False
+
+    def _apply_popup_holiday_checkers(self):
+        if hasattr(self, "start_date_edit") and hasattr(self.start_date_edit, "_calendar_popup"):
+            self.start_date_edit._calendar_popup.set_holiday_checker(self._is_holiday_qdate)
+        if hasattr(self, "end_date_edit") and hasattr(self.end_date_edit, "_calendar_popup"):
+            self.end_date_edit._calendar_popup.set_holiday_checker(self._is_holiday_qdate)
+
     def apply_new_schedule_defaults(self):
         """新增排程時套用預設值。"""
-        today = QDate.currentDate()
+        default_date = self.initial_date if self.initial_date is not None else QDate.currentDate()
 
-        # 開始時間：目前時間向上取整到最近整點或 30 分
-        self.set_start_time(self._get_rounded_current_time())
+        # 開始時間：優先使用外部帶入時間（例如日/週視圖格位），否則才用目前時間取整
+        if self.initial_time is not None:
+            self.set_start_time(self.initial_time)
+        else:
+            self.set_start_time(self._get_rounded_current_time())
 
         # 循環模式：每天 + 每個工作日
         self.radio_daily.setChecked(True)
@@ -356,9 +788,9 @@ class RecurrenceDialog(QDialog):
         else:
             self.set_custom_duration(5)
 
-        # 循環範圍：開始為今天；結束於今天 + 3 個月
-        self.start_date_edit.setDate(today)
-        self.end_date_edit.setDate(today.addMonths(3))
+        # 循環範圍：開始為預設日期；結束於開始 + 3 個月
+        self.start_date_edit.setDate(default_date)
+        self.end_date_edit.setDate(default_date.addMonths(3))
         self.radio_end_never.setChecked(True)
 
     def set_default_times(self):
@@ -586,6 +1018,14 @@ class RecurrenceDialog(QDialog):
             self.duration_combo.lineEdit().editingFinished.connect(self.on_duration_text_edited)
             self.duration_combo.lineEdit().textChanged.connect(self.on_duration_text_changed)
 
+        combo_targets = [self.start_time_combo, self.end_time_combo, self.duration_combo]
+        for combo in combo_targets:
+            combo.installEventFilter(self)
+            if combo.lineEdit() is not None:
+                combo.lineEdit().installEventFilter(self)
+
+        self._register_combo_wheel_targets()
+
         # 頻率選擇變更
         self.radio_daily.toggled.connect(self.on_frequency_changed)
         self.radio_weekly.toggled.connect(self.on_frequency_changed)
@@ -594,6 +1034,27 @@ class RecurrenceDialog(QDialog):
 
         # 結束條件變更
         self.end_button_group.buttonToggled.connect(self.on_end_condition_changed)
+
+    def _register_combo_wheel_targets(self):
+        self._wheel_combo_targets.clear()
+        for combo in self.findChildren(QComboBox):
+            if type(combo) is not QComboBox:
+                continue
+
+            self._wheel_combo_targets[combo] = combo
+            combo.installEventFilter(self)
+
+            line_edit = combo.lineEdit()
+            if line_edit is not None:
+                self._wheel_combo_targets[line_edit] = combo
+                line_edit.installEventFilter(self)
+
+            view = combo.view()
+            if view is not None:
+                self._wheel_combo_targets[view] = combo
+                self._wheel_combo_targets[view.viewport()] = combo
+                view.installEventFilter(self)
+                view.viewport().installEventFilter(self)
 
     def parse_existing_rrule(self):
         """解析現有的 RRULE 字串並設置控制項"""
@@ -631,8 +1092,13 @@ class RecurrenceDialog(QDialog):
             elif freq == "WEEKLY":
                 self.weekly_interval.setValue(interval)
             elif freq == "MONTHLY":
-                self.monthly_interval.setValue(interval)
-                self.monthly_week_interval.setValue(interval)
+                interval = max(1, min(12, interval))
+                idx = self.monthly_interval.findData(interval)
+                if idx >= 0:
+                    self.monthly_interval.setCurrentIndex(idx)
+                idx = self.monthly_week_interval.findData(interval)
+                if idx >= 0:
+                    self.monthly_week_interval.setCurrentIndex(idx)
             elif freq == "YEARLY":
                 self.yearly_interval.setValue(interval)
 
@@ -752,7 +1218,10 @@ class RecurrenceDialog(QDialog):
             elif byday and bysetpos:
                 # 每月第幾個星期幾
                 self.radio_monthly_week.setChecked(True)
-                self.monthly_week_interval.setValue(int(params.get("INTERVAL", "1")))
+                interval = max(1, min(12, int(params.get("INTERVAL", "1"))))
+                idx = self.monthly_week_interval.findData(interval)
+                if idx >= 0:
+                    self.monthly_week_interval.setCurrentIndex(idx)
                 setpos_to_index = {1: 0, 2: 1, 3: 2, 4: 3, -1: 4}
                 bysetpos_num = int(bysetpos)
                 self.monthly_week_num.setCurrentIndex(setpos_to_index.get(bysetpos_num, 0))
@@ -970,9 +1439,7 @@ class RecurrenceDialog(QDialog):
         self.radio_daily_every.setChecked(True)
         layout.addWidget(self.radio_daily_every)
 
-        self.daily_interval = QSpinBox()
-        self.daily_interval.setMinimum(1)
-        self.daily_interval.setMaximum(999)
+        self.daily_interval = RollingNumberComboBox(1, 999)
         self.daily_interval.setValue(1)
         self.daily_interval.setFixedWidth(50)
         layout.addWidget(self.daily_interval)
@@ -1003,9 +1470,7 @@ class RecurrenceDialog(QDialog):
         repeat_label = QLabel("重複於每(C)")
         repeat_label.setObjectName("fieldLabel")
         top_layout.addWidget(repeat_label)
-        self.weekly_interval = QSpinBox()
-        self.weekly_interval.setMinimum(1)
-        self.weekly_interval.setMaximum(52)
+        self.weekly_interval = RollingNumberComboBox(1, 52)
         self.weekly_interval.setValue(1)
         self.weekly_interval.setFixedWidth(50)
         top_layout.addWidget(self.weekly_interval)
@@ -1054,10 +1519,10 @@ class RecurrenceDialog(QDialog):
         self.radio_monthly_day.setChecked(True)
         day_layout.addWidget(self.radio_monthly_day)
 
-        self.monthly_interval = QSpinBox()
-        self.monthly_interval.setMinimum(1)
-        self.monthly_interval.setMaximum(12)
-        self.monthly_interval.setValue(1)
+        self.monthly_interval = QComboBox()
+        for value in range(1, 13):
+            self.monthly_interval.addItem(str(value), value)
+        self.monthly_interval.setCurrentIndex(0)
         self.monthly_interval.setFixedWidth(50)
         day_layout.addWidget(self.monthly_interval)
 
@@ -1065,9 +1530,7 @@ class RecurrenceDialog(QDialog):
         month_label.setObjectName("fieldLabel")
         day_layout.addWidget(month_label)
 
-        self.monthly_day = QSpinBox()
-        self.monthly_day.setMinimum(1)
-        self.monthly_day.setMaximum(31)
+        self.monthly_day = RollingNumberComboBox(1, 31)
         self.monthly_day.setValue(1)
         self.monthly_day.setFixedWidth(50)
         day_layout.addWidget(self.monthly_day)
@@ -1083,10 +1546,10 @@ class RecurrenceDialog(QDialog):
         self.radio_monthly_week = QRadioButton("每(E)")
         week_layout.addWidget(self.radio_monthly_week)
 
-        self.monthly_week_interval = QSpinBox()
-        self.monthly_week_interval.setMinimum(1)
-        self.monthly_week_interval.setMaximum(12)
-        self.monthly_week_interval.setValue(1)
+        self.monthly_week_interval = QComboBox()
+        for value in range(1, 13):
+            self.monthly_week_interval.addItem(str(value), value)
+        self.monthly_week_interval.setCurrentIndex(0)
         self.monthly_week_interval.setFixedWidth(50)
         week_layout.addWidget(self.monthly_week_interval)
 
@@ -1126,9 +1589,7 @@ class RecurrenceDialog(QDialog):
         year_repeat_label = QLabel("重複於每(C)")
         year_repeat_label.setObjectName("fieldLabel")
         top_layout.addWidget(year_repeat_label)
-        self.yearly_interval = QSpinBox()
-        self.yearly_interval.setMinimum(1)
-        self.yearly_interval.setMaximum(10)
+        self.yearly_interval = RollingNumberComboBox(1, 999)
         self.yearly_interval.setValue(1)
         self.yearly_interval.setFixedWidth(50)
         top_layout.addWidget(self.yearly_interval)
@@ -1164,9 +1625,7 @@ class RecurrenceDialog(QDialog):
         self.yearly_month.setFixedWidth(80)
         date_layout.addWidget(self.yearly_month)
 
-        self.yearly_day = QSpinBox()
-        self.yearly_day.setMinimum(1)
-        self.yearly_day.setMaximum(31)
+        self.yearly_day = RollingNumberComboBox(1, 31)
         self.yearly_day.setValue(1)
         self.yearly_day.setFixedWidth(50)
         date_layout.addWidget(self.yearly_day)
@@ -1268,9 +1727,7 @@ class RecurrenceDialog(QDialog):
         # SpinBox 和標籤放在同一個水平布局
         count_layout = QHBoxLayout()
         count_layout.setSpacing(5)
-        self.end_count = QSpinBox()
-        self.end_count.setMinimum(1)
-        self.end_count.setMaximum(999)
+        self.end_count = RollingNumberComboBox(1, 999)
         self.end_count.setValue(10)
         self.end_count.setFixedWidth(50)
         count_layout.addWidget(self.end_count)
@@ -1486,14 +1943,16 @@ class RecurrenceDialog(QDialog):
             freq = "MONTHLY"
 
             if self.radio_monthly_day.isChecked():
-                interval = self.monthly_interval.value()
+                interval_data = self.monthly_interval.currentData()
+                interval = int(interval_data) if isinstance(interval_data, int) else 1
                 bymonthday = str(self.monthly_day.value())
                 safe_day = min(self.monthly_day.value(), QDate(start_date.year(), start_date.month(), 1).daysInMonth())
                 candidate = QDate(start_date.year(), start_date.month(), safe_day)
                 if candidate.isValid():
                     dtstart_date = candidate
             else:
-                interval = self.monthly_week_interval.value()
+                interval_data = self.monthly_week_interval.currentData()
+                interval = int(interval_data) if isinstance(interval_data, int) else 1
                 week_num = self.monthly_week_num.currentIndex() + 1
                 if self.monthly_week_num.currentIndex() == 4:  # 最後一個
                     week_num = -1
@@ -1625,13 +2084,13 @@ class RecurrenceDialog(QDialog):
                 QPushButton {
                     background-color: #0e639c;
                     color: white;
-                    border: none;
+                    border: 1px solid #2a8ccd;
                     border-radius: 4px;
                     padding: 6px 16px;
                     font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: #1177bb;
+                    background-color: #1f89cd;
                 }
                 QPushButton:pressed {
                     background-color: #094771;
@@ -1678,6 +2137,15 @@ class RecurrenceDialog(QDialog):
                     padding: 4px 8px;
                     background-color: #1e1e1e;
                     color: #cccccc;
+                }
+                QComboBox::drop-down {
+                    width: 0px;
+                    border: none;
+                }
+                QComboBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
                 }
                 QSpinBox:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
                     border: 2px solid #0e639c;
@@ -1741,18 +2209,18 @@ class RecurrenceDialog(QDialog):
                     color: #2c3e50;
                 }
                 QPushButton {
-                    background-color: #0078d4;
-                    color: white;
-                    border: none;
+                    background-color: #e9ecef;
+                    color: #111111;
+                    border: 1px solid #9aa4ad;
                     border-radius: 4px;
                     padding: 6px 16px;
                     font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: #106ebe;
+                    background-color: #c7d4e2;
                 }
                 QPushButton:pressed {
-                    background-color: #005a9e;
+                    background-color: #cfd6dd;
                 }
                 QPushButton:disabled {
                     background-color: #cccccc;
@@ -1797,6 +2265,15 @@ class RecurrenceDialog(QDialog):
                     background-color: white;
                     color: #333;
                 }
+                QComboBox::drop-down {
+                    width: 0px;
+                    border: none;
+                }
+                QComboBox::down-arrow {
+                    image: none;
+                    width: 0px;
+                    height: 0px;
+                }
                 QSpinBox:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
                     border: 2px solid #0078d4;
                 }
@@ -1805,8 +2282,8 @@ class RecurrenceDialog(QDialog):
                     color: #333;
                 }
                 QComboBox::item:selected {
-                    background-color: #0078d4;
-                    color: white;
+                    background-color: #9ec6f3;
+                    color: #0f1f33;
                 }
                 QCalendarWidget QWidget {
                     background-color: #f5f5f5;
@@ -1815,8 +2292,8 @@ class RecurrenceDialog(QDialog):
                 QCalendarWidget QAbstractItemView:enabled {
                     background-color: white;
                     color: #333;
-                    selection-background-color: #0078d4;
-                    selection-color: white;
+                    selection-background-color: #9ec6f3;
+                    selection-color: #0f1f33;
                 }
                 QCalendarWidget QAbstractItemView:disabled {
                     color: #cccccc;
@@ -1830,12 +2307,59 @@ class RecurrenceDialog(QDialog):
                 }
             """)
 
+        if hasattr(self, "start_date_edit") and hasattr(self.start_date_edit, "_calendar_popup"):
+            self.start_date_edit._calendar_popup.apply_theme(is_dark)
+        if hasattr(self, "end_date_edit") and hasattr(self.end_date_edit, "_calendar_popup"):
+            self.end_date_edit._calendar_popup.apply_theme(is_dark)
+
     def get_rrule(self) -> str:
         """取得 RRULE 字串"""
         return self.build_rrule()
 
+    def keyPressEvent(self, event):
+        if self.embedded and event.key() == Qt.Key_Escape:
+            parent = self.parentWidget()
+            while parent is not None and not isinstance(parent, QDialog):
+                parent = parent.parentWidget()
+            if isinstance(parent, QDialog):
+                parent.reject()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def eventFilter(self, obj, event):
         """事件過濾器，用於處理時間 combo box 的鍵盤輸入"""
+        combo_pairs = [
+            (self.start_time_combo, self.start_time_combo.lineEdit()),
+            (self.end_time_combo, self.end_time_combo.lineEdit()),
+            (self.duration_combo, self.duration_combo.lineEdit()),
+        ]
+
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            for combo, line_edit in combo_pairs:
+                if obj in (combo, line_edit) and combo.isEnabled():
+                    QTimer.singleShot(0, combo.showPopup)
+                    event.accept()
+                    return True
+
+        if event.type() == QEvent.Wheel:
+            combo = self._wheel_combo_targets.get(obj)
+            if combo is not None and type(combo) is QComboBox and combo.isEnabled() and combo.count() > 0:
+                steps = _combo_steps_from_wheel(event)
+                if steps != 0:
+                    current_index = combo.currentIndex()
+                    if current_index < 0:
+                        current_index = 0
+                    target_index = current_index - steps
+                    if target_index < 0:
+                        target_index = 0
+                    elif target_index >= combo.count():
+                        target_index = combo.count() - 1
+                    if target_index != combo.currentIndex():
+                        combo.setCurrentIndex(target_index)
+                event.accept()
+                return True
+
         if obj in [self.start_time_combo.lineEdit(), self.end_time_combo.lineEdit()]:
             if event.type() == QEvent.KeyPress:
                 line_edit = obj

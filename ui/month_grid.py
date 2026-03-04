@@ -2,11 +2,21 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, date
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHeaderView, QInputDialog, QLabel, QMenu, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QDate, Qt, Signal, QEvent
+from PySide6.QtGui import QFont, QColor
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QComboBox,
+    QHeaderView,
+    QLabel,
+    QMenu,
+    QTableWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core.schedule_resolver import ResolvedOccurrence
 from core.lunar_calendar import to_lunar, LunarDateInfo
@@ -69,6 +79,44 @@ class EventChipLabel(QLabel):
         super().mouseDoubleClickEvent(event)
 
 
+class MergedEventLabel(QLabel):
+    merged_double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.merged_double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class WheelSelectComboBox(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.installEventFilter(self)
+        self.view().installEventFilter(self)
+        self.view().viewport().installEventFilter(self)
+
+    def _step_index(self, event) -> int:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return 0
+        steps = int(delta / 120)
+        if steps == 0:
+            steps = 1 if delta > 0 else -1
+        return -steps
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and watched in (self, self.view(), self.view().viewport()):
+            step = self._step_index(event)
+            if step != 0 and self.count() > 0:
+                new_index = max(0, min(self.count() - 1, self.currentIndex() + step))
+                self.setCurrentIndex(new_index)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+
 class MonthViewWidget(QWidget):
     date_selected = Signal(QDate)
     context_action_requested = Signal(str, dict)
@@ -78,6 +126,7 @@ class MonthViewWidget(QWidget):
         self.reference_date = QDate.currentDate()
         self.selected_date = QDate.currentDate()
         self.occurrences: List[ResolvedOccurrence] = []
+        self._holiday_checker: Optional[Callable[[QDate], bool]] = None
         self._cell_dates: Dict[tuple[int, int], QDate] = {}
 
         self.table = QTableWidget(6, 7)
@@ -104,7 +153,7 @@ class MonthViewWidget(QWidget):
         )
         self.table.cellClicked.connect(self._on_cell_clicked)
 
-        self.table.setHorizontalHeaderLabels(["日", "一", "二", "三", "四", "五", "六"])
+        self.table.setHorizontalHeaderLabels(["週日", "週一", "週二", "週三", "週四", "週五", "週六"])
         self._grouped_events: Dict[QDate, List[ResolvedOccurrence]] = {}
 
         layout = QVBoxLayout(self)
@@ -125,6 +174,20 @@ class MonthViewWidget(QWidget):
         self.occurrences = occurrences
         self._render()
 
+    def set_holiday_checker(self, checker: Optional[Callable[[QDate], bool]]):
+        self._holiday_checker = checker
+        self._render()
+
+    def _is_holiday(self, qdate: QDate) -> bool:
+        if qdate.dayOfWeek() in (6, 7):
+            return True
+        if self._holiday_checker is None:
+            return False
+        try:
+            return bool(self._holiday_checker(qdate))
+        except Exception:
+            return False
+
     def _group_by_date(self) -> Dict[QDate, List[ResolvedOccurrence]]:
         grouped: Dict[QDate, List[ResolvedOccurrence]] = defaultdict(list)
         for occurrence in self.occurrences:
@@ -140,14 +203,16 @@ class MonthViewWidget(QWidget):
         container = QWidget()
         is_selected = qdate == self.selected_date
         is_today = qdate == QDate.currentDate()
+        is_holiday = self._is_holiday(qdate)
+        is_dark_palette = self.palette().window().color().lightness() < 128
 
         if is_selected and is_today:
             container.setStyleSheet(
-                "background-color: rgba(47, 115, 217, 0.22); border: 2px solid #f4c542; border-radius: 4px;"
+                "background-color: rgba(47, 115, 217, 0.42); border: 2px solid #f4c542; border-radius: 4px;"
             )
         elif is_selected:
             container.setStyleSheet(
-                "background-color: rgba(47, 115, 217, 0.18); border: 1px solid #2f73d9; border-radius: 4px;"
+                "background-color: rgba(47, 115, 217, 0.30); border: 1px solid #2f73d9; border-radius: 4px;"
             )
         elif is_today:
             container.setStyleSheet(
@@ -172,39 +237,60 @@ class MonthViewWidget(QWidget):
 
         date_label = QLabel(text)
         if qdate.month() != self.reference_date.month():
-            date_label.setStyleSheet("color: #808080;")
-        elif is_selected:
-            date_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+            cross_month_color = "#b36b6b" if is_holiday else "#808080"
+            date_label.setStyleSheet(f"font-weight: bold; color: {cross_month_color};")
+        elif is_selected and is_holiday:
+            date_label.setStyleSheet("font-weight: bold; color: #c62828;")
         elif is_today:
-            date_label.setStyleSheet("font-weight: bold; color: #f4c542;")
+            today_color = "#ff8f00"
+            date_label.setStyleSheet(f"font-weight: bold; color: {today_color};")
+        elif is_holiday:
+            date_label.setStyleSheet("font-weight: bold; color: #c62828;")
+        elif is_selected:
+            selected_color = "#f0f0f0" if is_dark_palette else "#111111"
+            date_label.setStyleSheet(f"font-weight: bold; color: {selected_color};")
         else:
             date_label.setStyleSheet("font-weight: bold;")
 
         layout.addWidget(date_label)
 
-        for occurrence in events[:3]:
-            chip = EventChipLabel(occurrence, occurrence.title)
-            chip.setStyleSheet(
-                f"background-color: {occurrence.category_bg};"
-                f"color: {occurrence.category_fg};"
+        if len(events) >= 3:
+            merged_label = MergedEventLabel(f"{len(events)} 筆任務")
+            merged_label.setStyleSheet(
+                "background-color: #2f73d9;"
+                "color: #ffffff;"
                 "border-radius: 8px;"
                 "padding: 2px 6px;"
+                "font-weight: 600;"
             )
-            chip.setToolTip(
-                f"{occurrence.title}\n"
-                f"{occurrence.start.strftime('%H:%M')} - {occurrence.end.strftime('%H:%M')}\n"
-                f"{occurrence.target_value}"
+            merged_label.setToolTip(
+                "\n".join(
+                    f"{occ.title} ({occ.start.strftime('%H:%M')} - {occ.end.strftime('%H:%M')})"
+                    for occ in events
+                )
             )
-            chip.event_double_clicked.connect(
-                lambda occ, cell_date=qdate: self._on_chip_double_clicked(cell_date, occ)
+            merged_label.merged_double_clicked.connect(
+                lambda cell_date=qdate: self._on_merged_label_double_clicked(cell_date)
             )
-            layout.addWidget(chip)
-
-        remain = len(events) - 3
-        if remain > 0:
-            more_label = QLabel(f"+{remain} more")
-            more_label.setStyleSheet("color: #555555; font-size: 11px;")
-            layout.addWidget(more_label)
+            layout.addWidget(merged_label)
+        else:
+            for occurrence in events:
+                chip = EventChipLabel(occurrence, occurrence.title)
+                chip.setStyleSheet(
+                    f"background-color: {occurrence.category_bg};"
+                    f"color: {occurrence.category_fg};"
+                    "border-radius: 8px;"
+                    "padding: 2px 6px;"
+                )
+                chip.setToolTip(
+                    f"{occurrence.title}\n"
+                    f"{occurrence.start.strftime('%H:%M')} - {occurrence.end.strftime('%H:%M')}\n"
+                    f"{occurrence.target_value}"
+                )
+                chip.event_double_clicked.connect(
+                    lambda occ, cell_date=qdate: self._on_chip_double_clicked(cell_date, occ)
+                )
+                layout.addWidget(chip)
 
         layout.addStretch()
         return container
@@ -243,6 +329,22 @@ class MonthViewWidget(QWidget):
         }
         self.context_action_requested.emit("edit", payload)
 
+    def _on_merged_label_double_clicked(self, qdate: QDate):
+        """雙擊合併任務區塊時，先讓使用者選擇目標任務再編輯。"""
+        events = self._grouped_events.get(qdate, [])
+        target = self._pick_event(qdate, events, "編輯")
+        if target is None:
+            return
+
+        payload = {
+            "schedule_id": target.schedule_id,
+            "date": qdate.toString("yyyy-MM-dd"),
+            "hour": target.start.hour,
+            "week_mode": False,
+            "month_mode": True,
+        }
+        self.context_action_requested.emit("edit", payload)
+
     def _pick_event(self, qdate: QDate, events: List[ResolvedOccurrence], action_text: str) -> ResolvedOccurrence | None:
         """同一天多筆任務時，讓使用者選擇目標任務。"""
         if not events:
@@ -262,15 +364,35 @@ class MonthViewWidget(QWidget):
             option_map[label] = occ
             options.append(label)
 
-        selected, ok = QInputDialog.getItem(
-            self,
-            f"選擇要{action_text}的行程",
-            f"{qdate.toString('yyyy-MM-dd')} 有多筆任務，請選擇：",
-            options,
-            0,
-            False,
-        )
-        if not ok or not selected:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"選擇要{action_text}的行程")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(520)
+
+        layout = QVBoxLayout(dialog)
+        prompt = QLabel(f"{qdate.toString('yyyy-MM-dd')} 有多筆任務，請選擇：")
+        layout.addWidget(prompt)
+
+        combo = WheelSelectComboBox(dialog)
+        combo.setEditable(False)
+        combo.setMaxVisibleItems(10)
+        combo.addItems(options)
+        combo.setCurrentIndex(0)
+        if len(options) > 10:
+            combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        else:
+            combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        layout.addWidget(combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        selected = combo.currentText()
+        if not selected:
             return None
         return option_map.get(selected)
 

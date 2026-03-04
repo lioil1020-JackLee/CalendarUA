@@ -192,26 +192,45 @@ class DatabaseSettingsDialog(QDialog):
                 color: #495057;
             }
 
+            QComboBox {
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: white;
+                color: #495057;
+            }
+
+            QComboBox::drop-down {
+                width: 0px;
+                border: none;
+            }
+
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+
             QLineEdit:focus, QTextEdit:focus {
                 border-color: #80bdff;
                 outline: none;
             }
 
             QPushButton {
-                background-color: #007bff;
-                color: white;
-                border: none;
+                background-color: #e9ecef;
+                color: #111111;
+                border: 1px solid #9aa4ad;
                 border-radius: 4px;
                 padding: 8px 16px;
                 font-weight: bold;
             }
 
             QPushButton:hover {
-                background-color: #0056b3;
+                background-color: #c7d4e2;
             }
 
             QPushButton:pressed {
-                background-color: #004085;
+                background-color: #cfd6dd;
             }
 
             QProgressBar {
@@ -261,6 +280,25 @@ class DatabaseSettingsDialog(QDialog):
                 color: #cccccc;
             }
 
+            QComboBox {
+                border: 1px solid #555555;
+                border-radius: 4px;
+                padding: 6px;
+                background-color: #1e1e1e;
+                color: #cccccc;
+            }
+
+            QComboBox::drop-down {
+                width: 0px;
+                border: none;
+            }
+
+            QComboBox::down-arrow {
+                image: none;
+                width: 0px;
+                height: 0px;
+            }
+
             QLineEdit:focus, QTextEdit:focus {
                 border-color: #0e639c;
                 outline: none;
@@ -269,14 +307,14 @@ class DatabaseSettingsDialog(QDialog):
             QPushButton {
                 background-color: #0e639c;
                 color: white;
-                border: none;
+                border: 1px solid #2a8ccd;
                 border-radius: 4px;
                 padding: 8px 16px;
                 font-weight: bold;
             }
 
             QPushButton:hover {
-                background-color: #1177bb;
+                background-color: #1f89cd;
             }
 
             QPushButton:pressed {

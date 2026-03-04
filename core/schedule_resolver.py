@@ -73,7 +73,7 @@ def _extract_target_value(schedule: Dict[str, Any]) -> str:
 
 
 def _pick_color(target_value: str) -> tuple[str, str]:
-    return "#ff1a1a", "#ffffff"
+    return "#2f73d9", "#ffffff"
 
 
 def _build_holiday_map(holiday_entries: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
