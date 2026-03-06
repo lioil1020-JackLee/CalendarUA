@@ -3099,6 +3099,7 @@ class CalendarUA(QMainWindow):
 
         handler: Optional[OPCHandler] = None
         connection_signature: Optional[tuple] = None
+        status_msg = ""
 
         try:
             # 更新狀態為執行中
@@ -3110,10 +3111,10 @@ class CalendarUA(QMainWindow):
 
             attempt = 0
             success_once = False
+            skipped_due_to_holiday = False
             lock_poll_interval = 1
             lock_enabled = bool(schedule.get("lock_enabled", 0))
             duration_minutes = self._parse_duration_from_rrule(schedule.get("rrule_str", ""))
-            status_msg = ""
 
             while True:
                 runtime_schedule = schedule
@@ -3125,6 +3126,14 @@ class CalendarUA(QMainWindow):
                 if not bool(runtime_schedule.get("is_enabled", 1)):
                     status_msg = "排程已停用，停止執行"
                     break
+
+                if self.db_manager and not bool(runtime_schedule.get("ignore_holiday", 0)):
+                    holiday_rule = self.db_manager.is_holiday_on_date(effective_trigger_time.date())
+                    if holiday_rule:
+                        skipped_due_to_holiday = True
+                        status_msg = f"假日不執行: {runtime_schedule.get('task_name', '')}"
+                        self.db_manager.update_execution_status(schedule_id, "假日不執行")
+                        break
 
                 opc_url = runtime_schedule.get("opc_url", "")
                 node_id = runtime_schedule.get("node_id", "")
@@ -3250,6 +3259,9 @@ class CalendarUA(QMainWindow):
                 self.execution_counts[schedule_id] = self.execution_counts.get(schedule_id, 0) + 1
                 # 檢查是否達到 COUNT 上限
                 self._check_and_disable_if_count_reached(schedule_id, schedule.get("rrule_str", ""))
+            elif skipped_due_to_holiday:
+                if not status_msg:
+                    status_msg = "假日不執行"
             else:
                 if self.db_manager:
                     self.db_manager.update_execution_status(schedule_id, "寫入失敗")
@@ -3263,13 +3275,13 @@ class CalendarUA(QMainWindow):
         finally:
             if handler and handler.is_connected:
                 await handler.disconnect()
+            # 更新狀態列和重新載入表格
+            if status_msg:
+                self.status_bar.showMessage(status_msg, 5000)
+            self.load_schedules()
 
-        # 更新狀態列和重新載入表格
-        self.status_bar.showMessage(status_msg, 5000)
-        self.load_schedules()
-        
-        # 從執行中任務集合中移除
-        self.running_tasks.discard(schedule_id)
+            # 從執行中任務集合中移除
+            self.running_tasks.discard(schedule_id)
 
     def _is_target_value_matched(self, current_value: Any, target_value: Any, data_type: str) -> bool:
         """比較目前讀值是否已符合目標值。"""

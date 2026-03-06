@@ -72,6 +72,15 @@ def _extract_target_value(schedule: Dict[str, Any]) -> str:
     return str(schedule.get("target_value", "")).strip()
 
 
+def _append_suffix_once(title: str, suffix: str) -> str:
+    text = str(title or "").strip()
+    if not text:
+        return suffix
+    if text.endswith(suffix):
+        return text
+    return f"{text} {suffix}"
+
+
 def _pick_color(target_value: str) -> tuple[str, str]:
     return "#2f73d9", "#ffffff"
 
@@ -311,17 +320,17 @@ def resolve_occurrences_for_range(
             resolved_end = end
 
             holiday_entry = None
-            if holiday_map and not ignore_holiday:
+            if holiday_map:
                 holiday_entry = _pick_matched_holiday_entry(holiday_map, start, end)
 
             if holiday_entry:
                 is_holiday = True
-                source = "holiday"
-
-                if holiday_entry.get("override_target_value"):
-                    resolved_target = str(holiday_entry.get("override_target_value"))
-
-                bg_color, fg_color = _pick_color(resolved_target)
+                if ignore_holiday:
+                    source = "holiday_execute"
+                    bg_color, fg_color = schedule_bg, schedule_fg
+                else:
+                    source = "holiday_skip"
+                    bg_color, fg_color = "#c62828", "#ffffff"
             else:
                 bg_color, fg_color = schedule_bg, schedule_fg
 
@@ -348,6 +357,16 @@ def resolve_occurrences_for_range(
             else:
                 # 沒有 exception 覆寫,保留 holiday 或 schedule 顏色
                 pass
+
+            if is_holiday:
+                if ignore_holiday:
+                    resolved_title = _append_suffix_once(resolved_title, "(假日執行)")
+                    source = "holiday_execute"
+                    bg_color, fg_color = schedule_bg, schedule_fg
+                else:
+                    resolved_title = _append_suffix_once(resolved_title, "(假日不執行)")
+                    source = "holiday_skip"
+                    bg_color, fg_color = "#c62828", "#ffffff"
 
             if configured_range_start and resolved_start < configured_range_start:
                 if not resolved_title.endswith("(過期)"):
