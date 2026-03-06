@@ -34,7 +34,6 @@ import os
 from datetime import date as dt_date
 
 from core.lunar_calendar import to_lunar
-from ui.combo_wheel_helper import attach_combo_wheel_behavior
 
 
 def get_app_icon():
@@ -715,7 +714,6 @@ class RecurrenceDialog(QDialog):
             self.setMinimumWidth(700)
 
         self.setup_ui()
-        attach_combo_wheel_behavior(self)
         self.apply_modern_style()
         self._apply_popup_holiday_checkers()
         self.lock_recurrence_detail_height()
@@ -847,8 +845,14 @@ class RecurrenceDialog(QDialog):
         self.start_time_combo = QComboBox()
         self.start_time_combo.setEditable(True)
         self.start_time_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.start_time_combo.setMaxVisibleItems(10)
         self.start_time_combo.setFixedWidth(130)
         self._populate_time_combo(self.start_time_combo)
+        if self.start_time_combo.lineEdit() is not None:
+            self.start_time_combo.lineEdit().setReadOnly(True)
+            self.start_time_combo.lineEdit().setAlignment(Qt.AlignCenter)
+            self.start_time_combo.lineEdit().setCursor(Qt.PointingHandCursor)
+        self.start_time_combo.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.start_time_combo, 0, 1)
 
         # 結束時間
@@ -858,8 +862,14 @@ class RecurrenceDialog(QDialog):
         self.end_time_combo = QComboBox()
         self.end_time_combo.setEditable(True)
         self.end_time_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.end_time_combo.setMaxVisibleItems(10)
         self.end_time_combo.setFixedWidth(130)
         self._populate_time_combo(self.end_time_combo)
+        if self.end_time_combo.lineEdit() is not None:
+            self.end_time_combo.lineEdit().setReadOnly(True)
+            self.end_time_combo.lineEdit().setAlignment(Qt.AlignCenter)
+            self.end_time_combo.lineEdit().setCursor(Qt.PointingHandCursor)
+        self.end_time_combo.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.end_time_combo, 1, 1)
 
         # 期間
@@ -870,8 +880,14 @@ class RecurrenceDialog(QDialog):
         # 允許自訂輸入（可編輯），但不要自動插入新項目
         self.duration_combo.setEditable(True)
         self.duration_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.duration_combo.setMaxVisibleItems(10)
         self.duration_combo.setFixedWidth(130)
         self.update_duration_combo()
+        if self.duration_combo.lineEdit() is not None:
+            self.duration_combo.lineEdit().setReadOnly(True)
+            self.duration_combo.lineEdit().setAlignment(Qt.AlignCenter)
+            self.duration_combo.lineEdit().setCursor(Qt.PointingHandCursor)
+        self.duration_combo.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.duration_combo, 2, 1)
 
         self.lock_checkbox = QCheckBox("Lock")
@@ -1728,7 +1744,7 @@ class RecurrenceDialog(QDialog):
         count_layout = QHBoxLayout()
         count_layout.setSpacing(5)
         self.end_count = RollingNumberComboBox(1, 999)
-        self.end_count.setValue(10)
+        self.end_count.setValue(1)
         self.end_count.setFixedWidth(50)
         count_layout.addWidget(self.end_count)
 
@@ -2335,6 +2351,16 @@ class RecurrenceDialog(QDialog):
             (self.duration_combo, self.duration_combo.lineEdit()),
         ]
 
+        wheel_targets: dict[object, QComboBox] = {}
+        for combo, line_edit in combo_pairs:
+            wheel_targets[combo] = combo
+            if line_edit is not None:
+                wheel_targets[line_edit] = combo
+            view = combo.view()
+            if view is not None:
+                wheel_targets[view] = combo
+                wheel_targets[view.viewport()] = combo
+
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
             for combo, line_edit in combo_pairs:
                 if obj in (combo, line_edit) and combo.isEnabled():
@@ -2343,8 +2369,13 @@ class RecurrenceDialog(QDialog):
                     return True
 
         if event.type() == QEvent.Wheel:
-            combo = self._wheel_combo_targets.get(obj)
-            if combo is not None and type(combo) is QComboBox and combo.isEnabled() and combo.count() > 0:
+            combo = wheel_targets.get(obj)
+            if combo is not None and combo.isEnabled() and combo.count() > 0:
+                view = combo.view()
+                if obj in (view, view.viewport()):
+                    # 下拉展開時，讓清單使用原生滾輪捲動行為。
+                    return False
+
                 steps = _combo_steps_from_wheel(event)
                 if steps != 0:
                     current_index = combo.currentIndex()

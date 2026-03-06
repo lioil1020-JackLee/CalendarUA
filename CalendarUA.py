@@ -291,7 +291,7 @@ class NavCalendarWidget(QCalendarWidget):
 
         # 畫選取高亮（兩個小月曆共用同一個選取日期；但隱藏格不畫）
         if (not hide) and self._forced_selected_date and date == self._forced_selected_date:
-            sel = QColor("#0078d7") if is_dark_palette else QColor("#9ec6f3")
+            sel = QColor("#2e7d32") if is_dark_palette else QColor("#66bb6a")
             painter.setPen(Qt.NoPen)
             painter.setBrush(sel)
             r = rect.adjusted(2, 2, -2, -2)
@@ -506,6 +506,7 @@ class CalendarUA(QMainWindow):
 
         # 目前選取的排程 ID (Ribbon Edit/Delete 使用)
         self.selected_schedule_id: Optional[int] = None
+        self._copied_schedule_ids: List[int] = []
 
         # 主題模式: "light", "dark", "system"
         self.current_theme = "system"
@@ -1987,13 +1988,24 @@ class CalendarUA(QMainWindow):
     def _on_calendar_context_action(self, action: str, payload: dict):
         """處理 Day/Week/Month 視圖發出的右鍵選單動作"""
         schedule_id = payload.get("schedule_id")
+        schedule_ids_raw = payload.get("schedule_ids")
+        schedule_ids: List[int] = []
+        if isinstance(schedule_ids_raw, list):
+            for value in schedule_ids_raw:
+                if isinstance(value, int):
+                    schedule_ids.append(value)
+        if isinstance(schedule_id, int) and schedule_id not in schedule_ids:
+            schedule_ids.insert(0, schedule_id)
+
         date_str = payload.get("date")
         hour = payload.get("hour")
         minute = payload.get("minute")
+        month_mode = bool(payload.get("month_mode", False))
 
         # 記錄本次操作預設小時，供新增排程時帶入 RecurrenceDialog
         self._context_default_hour = hour if isinstance(hour, int) else None
         self._context_default_minute = minute if isinstance(minute, int) else 0
+
         if date_str:
             try:
                 y, m, d = map(int, date_str.split("-"))
@@ -2002,6 +2014,17 @@ class CalendarUA(QMainWindow):
                 self._update_nav_calendars(y, m)
             except Exception:
                 pass
+
+        # 月視圖新增：以目前最近且「未來」的半小時作為預設開始時間。
+        if action == "new" and month_mode:
+            nearest = self._nearest_future_half_hour(datetime.now())
+            self._context_default_hour = nearest.hour
+            self._context_default_minute = nearest.minute
+
+            # 若使用者在「今天」新增且取整已跨到隔日，預設日期同步到隔天。
+            if self.reference_date == QDate.currentDate() and nearest.date() > datetime.now().date():
+                self.reference_date = self.reference_date.addDays(1)
+                self._update_nav_calendars(self.reference_date.year(), self.reference_date.month())
 
         if action == "new":
             self.add_schedule()
@@ -2017,17 +2040,356 @@ class CalendarUA(QMainWindow):
             else:
                 QMessageBox.information(self, "提示", "此日期尚未有行程可編輯。")
         elif action == "delete":
-            if schedule_id:
-                self.delete_schedule(schedule_id)
+            if schedule_ids:
+                if len(schedule_ids) == 1:
+                    self.delete_schedule(schedule_ids[0])
+                else:
+                    self._delete_schedules(schedule_ids)
             else:
                 QMessageBox.information(self, "提示", "此日期尚未有行程可刪除。")
-        elif action == "today":
-            today = QDate.currentDate()
-            self.reference_date = today
-            self._update_nav_calendars(today.year(), today.month())
-            self._refresh_main_calendar_views()
-        elif action == "refresh":
-            self.refresh_schedules()
+        elif action == "copy":
+            if schedule_ids:
+                self._copy_schedules(schedule_ids)
+            else:
+                QMessageBox.information(self, "提示", "此日期尚未有行程可複製。")
+        elif action == "paste":
+            self._paste_schedule(payload)
+        elif action == "drag_update":
+            self._apply_drag_time_update(payload)
+
+    def _copy_schedule(self, schedule_id: int):
+        self._copy_schedules([schedule_id])
+
+    def _copy_schedules(self, schedule_ids: List[int]):
+        unique_ids: List[int] = []
+        seen: set[int] = set()
+        for value in schedule_ids:
+            if not isinstance(value, int):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            unique_ids.append(value)
+
+        if not unique_ids:
+            QMessageBox.warning(self, "提示", "找不到可複製的行程。")
+            return
+
+        existing_ids = {int(s.get("id", 0) or 0) for s in self.schedules}
+        valid_ids = [sid for sid in unique_ids if sid in existing_ids]
+        if not valid_ids:
+            QMessageBox.warning(self, "提示", "找不到可複製的行程。")
+            return
+
+        self._copied_schedule_ids = valid_ids
+        if len(valid_ids) == 1:
+            schedule_id = valid_ids[0]
+            schedule = next((s for s in self.schedules if int(s.get("id", 0) or 0) == schedule_id), None)
+            title = str(schedule.get("task_name", "")).strip() if schedule else ""
+            title = title or f"任務{schedule_id}"
+            self.status_bar.showMessage(f"已複製行程：{title} (ID:{schedule_id})", 2500)
+        else:
+            self.status_bar.showMessage(f"已複製 {len(valid_ids)} 筆行程", 2500)
+
+    def _delete_schedules(self, schedule_ids: List[int]):
+        if not self.db_manager:
+            QMessageBox.warning(self, "警告", "資料庫未連線")
+            return
+
+        unique_ids: List[int] = []
+        seen: set[int] = set()
+        for value in schedule_ids:
+            if not isinstance(value, int):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            unique_ids.append(value)
+
+        if not unique_ids:
+            return
+
+        if len(unique_ids) == 1:
+            self.delete_schedule(unique_ids[0])
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "確認刪除",
+            f"確定要刪除這 {len(unique_ids)} 筆排程嗎？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        success_count = 0
+        for sid in unique_ids:
+            try:
+                if self.db_manager.delete_schedule(sid):
+                    success_count += 1
+            except Exception:
+                continue
+
+        if success_count > 0:
+            self.load_schedules()
+            self.status_bar.showMessage(f"已刪除 {success_count} 筆排程", 3000)
+        else:
+            QMessageBox.critical(self, "錯誤", "批次刪除失敗")
+
+    def _rrule_duration_minutes(self, rrule_str: str) -> int:
+        match = re.search(r"(?:^|;)DURATION=PT(\d+)M(?:;|$)", str(rrule_str or "").upper())
+        if match:
+            try:
+                return max(1, int(match.group(1)))
+            except ValueError:
+                pass
+        return 5
+
+    def _rrule_time_parts(self, rrule_str: str) -> tuple[int, int]:
+        byhour = re.search(r"(?:^|;)BYHOUR=(\d{1,2})(?:;|$)", str(rrule_str or "").upper())
+        byminute = re.search(r"(?:^|;)BYMINUTE=(\d{1,2})(?:;|$)", str(rrule_str or "").upper())
+
+        hour = int(byhour.group(1)) if byhour else 9
+        minute = int(byminute.group(1)) if byminute else 0
+        return max(0, min(23, hour)), max(0, min(59, minute))
+
+    def _paste_schedule(self, payload: dict):
+        if not self.db_manager:
+            QMessageBox.warning(self, "警告", "資料庫未連線")
+            return
+
+        copied_ids = list(self._copied_schedule_ids)
+        if not copied_ids:
+            QMessageBox.information(self, "提示", "尚未複製任何行程。")
+            return
+
+        date_text = str(payload.get("date", "")).strip()
+        if not date_text:
+            QMessageBox.warning(self, "提示", "貼上位置無效。")
+            return
+
+        try:
+            y, m, d = map(int, date_text.split("-"))
+            target_date = QDate(y, m, d)
+        except Exception:
+            QMessageBox.warning(self, "提示", "貼上日期格式錯誤。")
+            return
+
+        target_hour = payload.get("hour")
+        target_minute = payload.get("minute")
+
+        created_count = 0
+        for copied_id in copied_ids:
+            source = next((s for s in self.schedules if int(s.get("id", 0) or 0) == copied_id), None)
+            if source is None:
+                continue
+
+            source_rrule = str(source.get("rrule_str", "") or "").strip()
+            if not source_rrule:
+                continue
+
+            fallback_hour, fallback_minute = self._rrule_time_parts(source_rrule)
+            hour = int(target_hour) if isinstance(target_hour, int) else fallback_hour
+            minute = int(target_minute) if isinstance(target_minute, int) else fallback_minute
+            hour = max(0, min(23, hour))
+            minute = max(0, min(59, minute))
+
+            start_dt = datetime(target_date.year(), target_date.month(), target_date.day(), hour, minute, 0)
+            end_dt = start_dt + timedelta(minutes=self._rrule_duration_minutes(source_rrule))
+            pasted_rrule = self._replace_rrule_time_fields(source_rrule, start_dt, end_dt)
+
+            source_title = str(source.get("task_name", "")).strip() or f"任務{copied_id}"
+            pasted_title = f"{source_title}_複製"
+
+            new_id = self.db_manager.add_schedule(
+                task_name=pasted_title,
+                opc_url=str(source.get("opc_url", "") or ""),
+                node_id=str(source.get("node_id", "") or ""),
+                target_value=str(source.get("target_value", "") or ""),
+                data_type=str(source.get("data_type", "auto") or "auto"),
+                rrule_str=pasted_rrule,
+                category_id=int(source.get("category_id", 1) or 1),
+                opc_security_policy=str(source.get("opc_security_policy", "None") or "None"),
+                opc_security_mode=str(source.get("opc_security_mode", "None") or "None"),
+                opc_username=str(source.get("opc_username", "") or ""),
+                opc_password=str(source.get("opc_password", "") or ""),
+                opc_timeout=int(source.get("opc_timeout", 5) or 5),
+                opc_write_timeout=int(source.get("opc_write_timeout", 3) or 3),
+                lock_enabled=int(source.get("lock_enabled", 0) or 0),
+                is_enabled=int(source.get("is_enabled", 1) or 1),
+                ignore_holiday=int(source.get("ignore_holiday", 0) or 0),
+            )
+            if new_id:
+                created_count += 1
+
+        if created_count <= 0:
+            QMessageBox.critical(self, "錯誤", "貼上行程失敗")
+            return
+
+        self.reference_date = target_date
+        self._update_nav_calendars(target_date.year(), target_date.month())
+        self.load_schedules()
+        self.status_bar.showMessage(f"已貼上 {created_count} 筆行程", 3000)
+
+    def _nearest_future_half_hour(self, base_dt: datetime) -> datetime:
+        """回傳嚴格晚於 base_dt 的最近半小時時間。"""
+        aligned = base_dt.replace(second=0, microsecond=0)
+        minutes_mod = aligned.minute % 30
+        if minutes_mod == 0:
+            return aligned + timedelta(minutes=30)
+        return aligned + timedelta(minutes=(30 - minutes_mod))
+
+    def _weekday_code(self, dt: datetime) -> str:
+        mapping = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+        return mapping[dt.weekday()]
+
+    def _snap_minute_to_scale(self, minute: int, scale: int) -> int:
+        scale = max(1, int(scale))
+        minute = max(0, min(24 * 60, int(minute)))
+        snapped = int(round(minute / scale) * scale)
+        return max(0, min(24 * 60, snapped))
+
+    def _replace_rrule_time_fields(
+        self,
+        rrule_str: str,
+        new_start: datetime,
+        new_end: datetime,
+    ) -> str:
+        parts = [p.strip() for p in str(rrule_str or "").split(";") if p.strip()]
+        params: Dict[str, str] = {}
+        has_dtstart = False
+        key_order: List[str] = []
+
+        for part in parts:
+            if part.startswith("DTSTART:"):
+                has_dtstart = True
+                continue
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = key.upper()
+            params[key] = value
+            key_order.append(key)
+
+        freq = params.get("FREQ", "").upper()
+        params["BYHOUR"] = str(new_start.hour)
+        params["BYMINUTE"] = str(new_start.minute)
+        params["X-RANGE-START"] = new_start.strftime("%Y%m%d")
+
+        duration_minutes = max(1, int((new_end - new_start).total_seconds() // 60))
+        params["DURATION"] = f"PT{duration_minutes}M"
+
+        if freq == "MONTHLY" and "BYMONTHDAY" in params and "BYSETPOS" not in params:
+            params["BYMONTHDAY"] = str(new_start.day)
+        elif freq == "YEARLY" and "BYMONTHDAY" in params and "BYSETPOS" not in params:
+            params["BYMONTH"] = str(new_start.month)
+            params["BYMONTHDAY"] = str(new_start.day)
+        elif freq == "WEEKLY":
+            byday = params.get("BYDAY", "")
+            if byday and "," not in byday:
+                params["BYDAY"] = self._weekday_code(new_start)
+
+        result_parts: List[str] = []
+        emitted_keys: set[str] = set()
+
+        for part in parts:
+            if part.startswith("DTSTART:"):
+                result_parts.append(f"DTSTART:{new_start.strftime('%Y%m%dT%H%M%S')}")
+                continue
+            if "=" not in part:
+                result_parts.append(part)
+                continue
+
+            key, _value = part.split("=", 1)
+            key_upper = key.upper()
+            if key_upper in params:
+                result_parts.append(f"{key_upper}={params[key_upper]}")
+                emitted_keys.add(key_upper)
+            else:
+                result_parts.append(part)
+
+        for key in key_order:
+            if key in params and key not in emitted_keys:
+                result_parts.append(f"{key}={params[key]}")
+                emitted_keys.add(key)
+
+        for key in ("BYHOUR", "BYMINUTE", "X-RANGE-START", "DURATION"):
+            if key not in emitted_keys:
+                result_parts.append(f"{key}={params[key]}")
+                emitted_keys.add(key)
+
+        if not has_dtstart:
+            result_parts.append(f"DTSTART:{new_start.strftime('%Y%m%dT%H%M%S')}")
+
+        return ";".join(result_parts)
+
+    def _apply_drag_time_update(self, payload: dict):
+        """套用視圖拖曳後的時間調整（移動/改開始/改結束）。"""
+        schedule_id = payload.get("schedule_id")
+        if not isinstance(schedule_id, int):
+            return
+
+        target_schedule = next((s for s in self.schedules if int(s.get("id", 0) or 0) == schedule_id), None)
+        if target_schedule is None or not self.db_manager:
+            return
+
+        scale_minutes = payload.get("scale_minutes")
+        if not isinstance(scale_minutes, int) or scale_minutes <= 0:
+            scale_minutes = max(1, int(getattr(self.day_view, "time_scale_minutes", 60)))
+
+        source = str(payload.get("source", "")).strip().lower()
+        new_start: Optional[datetime] = None
+        new_end: Optional[datetime] = None
+
+        if source == "month_grid":
+            start_text = str(payload.get("start_datetime", "")).strip()
+            end_text = str(payload.get("end_datetime", "")).strip()
+            try:
+                new_start = datetime.strptime(start_text, "%Y-%m-%d %H:%M:%S")
+                new_end = datetime.strptime(end_text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return
+        else:
+            date_text = str(payload.get("date", "")).strip()
+            start_minute = payload.get("start_minute")
+            end_minute = payload.get("end_minute")
+            if not date_text or not isinstance(start_minute, int) or not isinstance(end_minute, int):
+                return
+
+            try:
+                base_date = datetime.strptime(date_text, "%Y-%m-%d")
+            except ValueError:
+                return
+
+            snapped_start = self._snap_minute_to_scale(start_minute, scale_minutes)
+            snapped_end = self._snap_minute_to_scale(end_minute, scale_minutes)
+            if snapped_end <= snapped_start:
+                snapped_end = min(24 * 60, snapped_start + scale_minutes)
+
+            new_start = base_date + timedelta(minutes=snapped_start)
+            new_end = base_date + timedelta(minutes=snapped_end)
+
+        if new_start is None or new_end is None or new_end <= new_start:
+            return
+
+        old_rrule = str(target_schedule.get("rrule_str", "") or "").strip()
+        if not old_rrule:
+            return
+
+        new_rrule = self._replace_rrule_time_fields(old_rrule, new_start, new_end)
+        if new_rrule == old_rrule:
+            return
+
+        success = self.db_manager.update_schedule(schedule_id=schedule_id, rrule_str=new_rrule)
+        if not success:
+            self.status_bar.showMessage("拖曳調整失敗：無法寫入排程", 4000)
+            return
+
+        self.reference_date = QDate(new_start.year, new_start.month, new_start.day)
+        self.load_schedules()
+        self._restart_scheduler_worker()
+        self.status_bar.showMessage("已套用拖曳調整", 2500)
 
     def init_database(self):
         """初始化資料庫連線"""
@@ -2086,6 +2448,8 @@ class CalendarUA(QMainWindow):
         minutes = self.db_manager.get_time_scale_minutes()
         self.day_view.set_time_scale(minutes)
         self.week_view.set_time_scale(minutes)
+        if hasattr(self, "month_view"):
+            self.month_view.set_time_scale(minutes)
 
     def _on_time_scale_changed(self, minutes: int):
         """同步日/週視圖刻度並保存到資料庫。"""
@@ -2094,6 +2458,9 @@ class CalendarUA(QMainWindow):
             self.week_view.set_time_scale(minutes)
         elif sender is self.week_view and self.day_view.time_scale_minutes != minutes:
             self.day_view.set_time_scale(minutes)
+
+        if hasattr(self, "month_view"):
+            self.month_view.set_time_scale(minutes)
 
         if self.db_manager:
             self.db_manager.save_time_scale_minutes(minutes)
@@ -3159,6 +3526,14 @@ class OPCNodeBrowserDialog(QDialog):
     """OPC UA 節點瀏覽對話框"""
 
     _last_selected_node_id: str = ""
+    _ROLE_NODE_ID = Qt.ItemDataRole.UserRole
+    _ROLE_DATA_TYPE = Qt.ItemDataRole.UserRole + 1
+    _ROLE_CAN_WRITE = Qt.ItemDataRole.UserRole + 2
+    _ROLE_NODE_CLASS = Qt.ItemDataRole.UserRole + 3
+    _ROLE_CHILDREN_LOADED = Qt.ItemDataRole.UserRole + 4
+    _ROLE_CHILDREN_LOADING = Qt.ItemDataRole.UserRole + 5
+    _cached_children_by_url: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    _last_selected_path_by_url: Dict[str, List[str]] = {}
 
     def __init__(self, parent=None, opc_url: str = "", preferred_node_id: str = ""):
         super().__init__(parent)
@@ -3167,6 +3542,7 @@ class OPCNodeBrowserDialog(QDialog):
         self.selected_node = ""
         self.opc_handler = None
         self.logger = logging.getLogger(__name__)
+        self._disconnecting = False
         self.setup_ui()
         self.apply_style()
         # 自動連線並載入節點
@@ -3215,6 +3591,38 @@ class OPCNodeBrowserDialog(QDialog):
             parent.setExpanded(True)
             parent = parent.parent()
 
+    def _current_cache(self) -> Dict[str, List[Dict[str, Any]]]:
+        return self._cached_children_by_url.setdefault(self.opc_url, {})
+
+    def _find_direct_child_by_node_id(self, parent_item, node_id: str):
+        target = self._extract_plain_node_id(node_id)
+        if not parent_item or not target:
+            return None
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            child_id = str(child.data(0, self._ROLE_NODE_ID) or child.text(1) or "").strip()
+            if child_id == target:
+                return child
+        return None
+
+    def _remember_selected_path(self, item):
+        node_id = str(item.data(0, self._ROLE_NODE_ID) or item.text(1) or "").strip()
+        if not node_id:
+            return
+
+        OPCNodeBrowserDialog._last_selected_node_id = node_id
+
+        path: List[str] = []
+        cursor = item
+        while cursor is not None:
+            cursor_node_id = str(cursor.data(0, self._ROLE_NODE_ID) or cursor.text(1) or "").strip()
+            if cursor_node_id:
+                path.insert(0, cursor_node_id)
+            cursor = cursor.parent()
+
+        if path:
+            self._last_selected_path_by_url[self.opc_url] = path
+
     def _restore_last_position(self):
         target = self.preferred_node_id or self._last_selected_node_id
         if not target:
@@ -3227,6 +3635,86 @@ class OPCNodeBrowserDialog(QDialog):
         self._expand_item_ancestors(item)
         self.tree_widget.setCurrentItem(item)
         self.tree_widget.scrollToItem(item)
+
+    async def _async_restore_last_position(self):
+        """在懶載入模式下恢復上次選取節點。"""
+        target = self.preferred_node_id or self._last_selected_node_id
+        if not target:
+            return
+
+        # 先嘗試目前已載入的節點
+        item = self._find_item_by_node_id(target)
+        if item is not None:
+            self._expand_item_ancestors(item)
+            self.tree_widget.setCurrentItem(item)
+            self.tree_widget.scrollToItem(item)
+            return
+
+        if not self.opc_handler or not self.opc_handler.is_connected or not self.opc_handler.client:
+            return
+
+        # 優先使用已記錄路徑直接還原，避免每次都重新搜尋。
+        remembered_path = list(self._last_selected_path_by_url.get(self.opc_url, []))
+        if remembered_path:
+            current = self.tree_widget.topLevelItem(0) if self.tree_widget.topLevelItemCount() > 0 else None
+            if current is not None:
+                current_id = str(current.data(0, self._ROLE_NODE_ID) or current.text(1) or "").strip()
+                start_index = 1 if remembered_path and remembered_path[0] == current_id else 0
+                restore_ok = True
+
+                for path_node_id in remembered_path[start_index:]:
+                    await self._async_load_children_for_item(current)
+                    next_item = self._find_direct_child_by_node_id(current, path_node_id)
+                    if next_item is None:
+                        restore_ok = False
+                        break
+                    current = next_item
+
+                if restore_ok:
+                    final_node_id = str(current.data(0, self._ROLE_NODE_ID) or current.text(1) or "").strip()
+                    if final_node_id == target:
+                        self._expand_item_ancestors(current)
+                        self.tree_widget.setCurrentItem(current)
+                        self.tree_widget.scrollToItem(current)
+                        self.status_label.setText(f"已定位上次節點: {current.text(0)}")
+                        self.status_label.setStyleSheet("color: #00aa00;")
+                        return
+
+        # 逐層展開 Object/View 節點直到找到目標，避免一次遞迴載完整棵樹
+        queue = []
+        for i in range(self.tree_widget.topLevelItemCount()):
+            queue.append(self.tree_widget.topLevelItem(i))
+
+        visited: set[str] = set()
+        max_expand = 500
+        expanded_count = 0
+
+        while queue and expanded_count < max_expand:
+            item = queue.pop(0)
+            if item is None:
+                continue
+
+            node_id = str(item.data(0, self._ROLE_NODE_ID) or item.text(1) or "").strip()
+            if not node_id or node_id in visited:
+                continue
+            visited.add(node_id)
+
+            node_class_name = str(item.data(0, self._ROLE_NODE_CLASS) or item.text(2) or "")
+            if node_class_name in ("Object", "View"):
+                await self._async_load_children_for_item(item)
+                expanded_count += 1
+
+            found = self._find_item_by_node_id(target)
+            if found is not None:
+                self._expand_item_ancestors(found)
+                self.tree_widget.setCurrentItem(found)
+                self.tree_widget.scrollToItem(found)
+                self.status_label.setText(f"已定位上次節點: {found.text(0)}")
+                self.status_label.setStyleSheet("color: #00aa00;")
+                return
+
+            for j in range(item.childCount()):
+                queue.append(item.child(j))
 
     def setup_ui(self):
         """設定介面"""
@@ -3261,6 +3749,8 @@ class OPCNodeBrowserDialog(QDialog):
         self.tree_widget.setColumnWidth(2, 100)
         self.tree_widget.setColumnWidth(3, 80)
         self.tree_widget.itemSelectionChanged.connect(self.on_selection_changed)
+        self.tree_widget.itemClicked.connect(self.on_item_clicked)
+        self.tree_widget.itemExpanded.connect(self.on_item_expanded)
         self.tree_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         layout.addWidget(self.tree_widget)
 
@@ -3269,7 +3759,7 @@ class OPCNodeBrowserDialog(QDialog):
         button_layout.addStretch()
 
         refresh_btn = QPushButton("重新整理")
-        refresh_btn.clicked.connect(self.connect_and_load)
+        refresh_btn.clicked.connect(lambda: self.connect_and_load(force_refresh=True))
         button_layout.addWidget(refresh_btn)
 
         button_layout.addSpacing(20)
@@ -3419,11 +3909,14 @@ class OPCNodeBrowserDialog(QDialog):
                 }
             """)
 
-    def connect_and_load(self):
+    def connect_and_load(self, force_refresh: bool = False):
         """連線到 OPC UA 並載入節點 - 使用 qasync 整合"""
         self.tree_widget.clear()
         self.status_label.setText("正在連線...")
         self.status_label.setStyleSheet("color: #666;")
+
+        if force_refresh:
+            self._cached_children_by_url.pop(self.opc_url, None)
 
         # 使用 QTimer 稍後執行異步操作，避免阻塞 UI
         QTimer.singleShot(100, self._async_connect_and_load)
@@ -3443,9 +3936,6 @@ class OPCNodeBrowserDialog(QDialog):
 
                     # 載入節點
                     await self._async_load_nodes()
-
-                    # 斷開連線
-                    await self.opc_handler.disconnect()
                 else:
                     self.status_label.setText("連線失敗 - 請檢查 URL 和伺服器狀態")
                     self.status_label.setStyleSheet("color: red;")
@@ -3467,7 +3957,7 @@ class OPCNodeBrowserDialog(QDialog):
             asyncio.run(do_connect())
 
     async def _async_load_nodes(self):
-        """異步載入 OPC UA 節點樹"""
+        """異步載入 OPC UA 節點樹（僅預載第一層）。"""
         try:
             # 取得 Objects 節點
             objects = await self.opc_handler.get_objects_node()
@@ -3477,13 +3967,21 @@ class OPCNodeBrowserDialog(QDialog):
                 root_item.setText(0, "Objects")
                 root_item.setText(1, "i=85")
                 root_item.setText(2, "Object")
+
+                root_item.setData(0, self._ROLE_NODE_ID, "i=85")
+                root_item.setData(0, self._ROLE_NODE_CLASS, "Object")
+                root_item.setData(0, self._ROLE_CAN_WRITE, None)
+                root_item.setData(0, self._ROLE_CHILDREN_LOADED, False)
+                root_item.setData(0, self._ROLE_CHILDREN_LOADING, True)
+
+                # 僅載入第一層，深層在使用者點擊/展開時再載入
+                await self._async_load_child_nodes(objects, root_item, depth=0)
+                root_item.setData(0, self._ROLE_CHILDREN_LOADED, True)
+                root_item.setData(0, self._ROLE_CHILDREN_LOADING, False)
                 root_item.setExpanded(True)
 
-                # 載入子節點
-                await self._async_load_child_nodes(objects, root_item, depth=0)
-
             self.status_label.setText("已載入節點")
-            self._restore_last_position()
+            await self._async_restore_last_position()
             # 確保樹狀元件正確更新
             self.tree_widget.viewport().update()
 
@@ -3492,78 +3990,207 @@ class OPCNodeBrowserDialog(QDialog):
             self.status_label.setStyleSheet("color: red;")
 
     async def _async_load_child_nodes(self, parent_node, parent_item, depth=0):
-        """異步遞迴載入子節點"""
-        if depth > 5:  # 增加深度限制到 5，以載入更深層的節點
+        """異步載入指定節點的直屬子節點（單層）。"""
+        if parent_item is None:
             return
 
         try:
-            # 取得子節點
-            children = await parent_node.get_children()
+            parent_node_id = str(parent_item.data(0, self._ROLE_NODE_ID) or parent_item.text(1) or "").strip()
+            cache = self._current_cache()
+            children_info = cache.get(parent_node_id)
 
-            for child in children:
-                try:
-                    child_item = QTreeWidgetItem(parent_item)
+            if children_info is None:
+                # 取得子節點
+                children = await parent_node.get_children()
+                children_info = []
+                seen_node_ids = set()
 
-                    # 取得節點資訊
-                    browse_name = await child.read_browse_name()
-                    # 正確格式化 Node ID
-                    node_id = child.nodeid.to_string()
-                    node_class = await child.read_node_class()
+                for child in children:
+                    try:
+                        # 取得節點資訊
+                        browse_name = await child.read_browse_name()
+                        # 正確格式化 Node ID
+                        node_id = child.nodeid.to_string()
+                        if node_id in seen_node_ids:
+                            continue
+                        seen_node_ids.add(node_id)
 
-                    # 讀取資料型別和存取權限（僅適用於變數節點）
-                    data_type = "-"
-                    access_level = ""
-                    can_write = False
-                    
-                    if node_class.name == "Variable":
-                        try:
-                            # 讀取資料型別
-                            detected_type = await self.opc_handler.read_node_data_type(node_id)
-                            data_type = detected_type if detected_type else "未知"
-                            self.logger.debug(f"Node {node_id} 資料型別: {data_type}")
-                            
-                            # 讀取存取權限
+                        node_class = await child.read_node_class()
+                        node_class_name = node_class.name
+
+                        # 讀取資料型別和存取權限（僅適用於變數節點）
+                        data_type = "-"
+                        can_write = None
+
+                        if node_class_name == "Variable":
                             try:
-                                from asyncua.ua import AttributeIds
-                                access_level_data = await child.read_attribute(AttributeIds.AccessLevel)
-                                # 從 DataValue 中提取實際值
-                                access_level_value = access_level_data.Value.Value if hasattr(access_level_data, 'Value') and access_level_data.Value else None
-                                self.logger.debug(f"Node {node_id} AccessLevel: {access_level_value}")
-                                # 檢查是否有 Write 權限 (0x02)，或者如果無法確定，預設為可寫入
-                                can_write = bool(access_level_value & 0x02) if access_level_value is not None and access_level_value > 0 else True
-                            except Exception as e:
-                                self.logger.debug(f"無法讀取 Node {node_id} 的 AccessLevel: {e}")
-                                # 如果無法讀取AccessLevel，預設為可寫入
-                                can_write = True
-                            
-                            if not can_write:
-                                data_type = "唯讀"
-                                access_level = "唯讀"
-                            
-                        except Exception as e:
-                            self.logger.error(f"讀取 Node {node_id} 資料型別失敗: {e}")
-                            data_type = "未知"
-                            can_write = False
+                                # 讀取資料型別
+                                detected_type = await self.opc_handler.read_node_data_type(node_id)
+                                data_type = detected_type if detected_type else "未知"
+                                self.logger.debug(f"Node {node_id} 資料型別: {data_type}")
 
-                    child_item.setText(0, browse_name.Name)
+                                # 讀取存取權限
+                                try:
+                                    from asyncua.ua import AttributeIds
+                                    access_level_data = await child.read_attribute(AttributeIds.AccessLevel)
+                                    access_level_value = access_level_data.Value.Value if hasattr(access_level_data, 'Value') and access_level_data.Value else None
+                                    self.logger.debug(f"Node {node_id} AccessLevel: {access_level_value}")
+                                    can_write = bool(access_level_value & 0x02) if access_level_value is not None and access_level_value > 0 else True
+                                except Exception as e:
+                                    self.logger.debug(f"無法讀取 Node {node_id} 的 AccessLevel: {e}")
+                                    can_write = True
+
+                                if not can_write:
+                                    data_type = "唯讀"
+
+                            except Exception as e:
+                                self.logger.error(f"讀取 Node {node_id} 資料型別失敗: {e}")
+                                data_type = "未知"
+                                can_write = False
+
+                        children_info.append(
+                            {
+                                "browse_name": browse_name.Name,
+                                "node_id": node_id,
+                                "node_class": node_class_name,
+                                "data_type": data_type,
+                                "can_write": can_write,
+                            }
+                        )
+
+                    except Exception as e:
+                        self.logger.warning(f"載入子節點失敗: {e}")
+                        # 即使失敗也要繼續處理其他節點
+
+                cache[parent_node_id] = children_info
+
+            # 重新載入該層時先清空舊子節點
+            parent_item.takeChildren()
+
+            if not children_info:
+                parent_item.setData(0, self._ROLE_CHILDREN_LOADED, True)
+                parent_item.setData(0, self._ROLE_CHILDREN_LOADING, False)
+                parent_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
+                return
+
+            loaded_children = []
+            seen_node_ids = set()
+
+            # 從快取資料建立同層節點，避免重覆網路讀取
+            for info in children_info:
+                try:
+                    node_id = str(info.get("node_id", "") or "").strip()
+                    if not node_id or node_id in seen_node_ids:
+                        continue
+                    seen_node_ids.add(node_id)
+
+                    child_item = QTreeWidgetItem(parent_item)
+                    browse_name = str(info.get("browse_name", "") or "")
+                    node_class_name = str(info.get("node_class", "") or "")
+                    data_type = str(info.get("data_type", "-") or "-")
+                    can_write = info.get("can_write", None)
+
+                    child_item.setText(0, browse_name)
                     child_item.setText(1, node_id)
-                    child_item.setText(2, str(node_class))
+                    child_item.setText(2, node_class_name)
                     child_item.setText(3, data_type)
 
                     # 儲存節點 ID 和資料型別
-                    child_item.setData(0, Qt.ItemDataRole.UserRole, node_id)
-                    child_item.setData(0, Qt.ItemDataRole.UserRole + 1, data_type)
-                    child_item.setData(0, Qt.ItemDataRole.UserRole + 2, can_write)
+                    child_item.setData(0, self._ROLE_NODE_ID, node_id)
+                    child_item.setData(0, self._ROLE_DATA_TYPE, data_type)
+                    child_item.setData(0, self._ROLE_CAN_WRITE, can_write)
+                    child_item.setData(0, self._ROLE_NODE_CLASS, node_class_name)
+                    child_item.setData(0, self._ROLE_CHILDREN_LOADED, False)
+                    child_item.setData(0, self._ROLE_CHILDREN_LOADING, False)
 
-                    # 繼續載入子節點
-                    await self._async_load_child_nodes(child, child_item, depth + 1)
+                    # Object/View 類型才顯示可展開符號，點擊時再動態載入其下一層
+                    if node_class_name in ("Object", "View"):
+                        child_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+                    else:
+                        child_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicatorWhenChildless)
+
+                    loaded_children.append(child_item)
 
                 except Exception as e:
-                    self.logger.warning(f"載入子節點失敗 (深度 {depth + 1}): {e}")
+                    self.logger.warning(f"載入子節點失敗: {e}")
                     # 即使失敗也要繼續處理其他節點
 
+            # 讓 UI 先刷新，保持快速回應
+            if loaded_children:
+                self.tree_widget.viewport().update()
+                await asyncio.sleep(0)
+
+            parent_item.setData(0, self._ROLE_CHILDREN_LOADED, True)
+            parent_item.setData(0, self._ROLE_CHILDREN_LOADING, False)
+
         except Exception as e:
-            self.logger.error(f"載入子節點列表失敗 (深度 {depth}): {e}")
+            parent_item.setData(0, self._ROLE_CHILDREN_LOADING, False)
+            self.logger.error(f"載入子節點列表失敗: {e}")
+
+    def _request_load_children(self, item):
+        """需要時才載入該節點下一層子節點。"""
+        if not item or not self.opc_handler or not self.opc_handler.is_connected:
+            return
+
+        node_class_name = str(item.data(0, self._ROLE_NODE_CLASS) or item.text(2) or "")
+        if node_class_name not in ("Object", "View"):
+            return
+
+        if bool(item.data(0, self._ROLE_CHILDREN_LOADED)):
+            return
+        if bool(item.data(0, self._ROLE_CHILDREN_LOADING)):
+            return
+
+        node_id = str(item.data(0, self._ROLE_NODE_ID) or item.text(1) or "").strip()
+        if not node_id:
+            return
+
+        async def do_load():
+            try:
+                await self._async_load_children_for_item(item)
+                self.status_label.setText(f"已載入 {item.text(0)} 子節點")
+                self.status_label.setStyleSheet("color: #00aa00;")
+                item.setExpanded(True)
+            except Exception as e:
+                item.setData(0, self._ROLE_CHILDREN_LOADING, False)
+                self.status_label.setText(f"載入子節點失敗: {e}")
+                self.status_label.setStyleSheet("color: red;")
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(do_load())
+            else:
+                loop.run_until_complete(do_load())
+        except RuntimeError:
+            asyncio.run(do_load())
+
+    async def _async_load_children_for_item(self, item):
+        """以 await 方式載入指定 item 子節點，供 restore 與點擊載入共用。"""
+        if not item or not self.opc_handler or not self.opc_handler.is_connected or not self.opc_handler.client:
+            return
+
+        node_class_name = str(item.data(0, self._ROLE_NODE_CLASS) or item.text(2) or "")
+        if node_class_name not in ("Object", "View"):
+            return
+        if bool(item.data(0, self._ROLE_CHILDREN_LOADED)):
+            return
+        if bool(item.data(0, self._ROLE_CHILDREN_LOADING)):
+            return
+
+        node_id = str(item.data(0, self._ROLE_NODE_ID) or item.text(1) or "").strip()
+        if not node_id:
+            return
+
+        item.setData(0, self._ROLE_CHILDREN_LOADING, True)
+        node = self.opc_handler.client.get_node(node_id)
+        await self._async_load_child_nodes(node, item, depth=0)
+
+    def on_item_clicked(self, item, column):
+        self._request_load_children(item)
+
+    def on_item_expanded(self, item):
+        self._request_load_children(item)
 
     def on_selection_changed(self):
         """處理選擇變更"""
@@ -3573,19 +4200,24 @@ class OPCNodeBrowserDialog(QDialog):
             display_name = selected_item.text(0)
             node_id = selected_item.text(1)
             data_type = selected_item.text(3) if selected_item.text(3) != "-" else "未知"
-            can_write = selected_item.data(0, Qt.ItemDataRole.UserRole + 2)
+            can_write = selected_item.data(0, self._ROLE_CAN_WRITE)
             
-            if can_write:
+            if can_write is True:
                 self.selected_node = f"{display_name}|{node_id}|{data_type}"
-                OPCNodeBrowserDialog._last_selected_node_id = node_id
+                self._remember_selected_path(selected_item)
                 self.select_btn.setEnabled(True)
                 self.status_label.setText("已選擇可寫入節點")
                 self.status_label.setStyleSheet("color: green;")
-            else:
+            elif can_write is False:
                 self.selected_node = ""
                 self.select_btn.setEnabled(False)
                 self.status_label.setText("選擇的節點為唯讀，無法寫入")
                 self.status_label.setStyleSheet("color: red;")
+            else:
+                self.selected_node = ""
+                self.select_btn.setEnabled(False)
+                self.status_label.setText("此節點可展開瀏覽，請選擇可寫入變數節點")
+                self.status_label.setStyleSheet("color: #666;")
         else:
             self.selected_node = ""
             self.select_btn.setEnabled(False)
@@ -3596,15 +4228,44 @@ class OPCNodeBrowserDialog(QDialog):
         display_name = item.text(0)
         node_id = item.text(1)
         data_type = item.text(3) if item.text(3) != "-" else "未知"
-        can_write = item.data(0, Qt.ItemDataRole.UserRole + 2)
+        can_write = item.data(0, self._ROLE_CAN_WRITE)
         
-        if can_write:
+        if can_write is True:
             self.selected_node = f"{display_name}|{node_id}|{data_type}"
-            OPCNodeBrowserDialog._last_selected_node_id = node_id
+            self._remember_selected_path(item)
             self.accept()
         else:
             self.status_label.setText("無法選擇唯讀節點")
             self.status_label.setStyleSheet("color: red;")
+
+    def _close_and_disconnect(self):
+        if self._disconnecting:
+            return
+        self._disconnecting = True
+
+        async def do_disconnect():
+            try:
+                if self.opc_handler and self.opc_handler.is_connected:
+                    await self.opc_handler.disconnect()
+            finally:
+                self._disconnecting = False
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(do_disconnect())
+            else:
+                loop.run_until_complete(do_disconnect())
+        except RuntimeError:
+            asyncio.run(do_disconnect())
+
+    def accept(self):
+        self._close_and_disconnect()
+        super().accept()
+
+    def reject(self):
+        self._close_and_disconnect()
+        super().reject()
 
     def get_selected_node(self) -> str:
         """取得選擇的節點 ID 和資料型別"""

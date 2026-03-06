@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import QDate, Qt, Signal, QEvent
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QCursor, QFont, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QComboBox,
     QHeaderView,
     QLabel,
+    QListWidget,
     QMenu,
     QTableWidget,
     QVBoxLayout,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from core.schedule_resolver import ResolvedOccurrence
 from core.lunar_calendar import to_lunar, LunarDateInfo
+from ui.wheel_select_list import WheelSelectListWidget
 
 
 def _month_grid_start(month_date: QDate) -> QDate:
@@ -90,33 +91,6 @@ class MergedEventLabel(QLabel):
         super().mouseDoubleClickEvent(event)
 
 
-class WheelSelectComboBox(QComboBox):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.installEventFilter(self)
-        self.view().installEventFilter(self)
-        self.view().viewport().installEventFilter(self)
-
-    def _step_index(self, event) -> int:
-        delta = event.angleDelta().y()
-        if delta == 0:
-            return 0
-        steps = int(delta / 120)
-        if steps == 0:
-            steps = 1 if delta > 0 else -1
-        return -steps
-
-    def eventFilter(self, watched, event):
-        if event.type() == QEvent.Wheel and watched in (self, self.view(), self.view().viewport()):
-            step = self._step_index(event)
-            if step != 0 and self.count() > 0:
-                new_index = max(0, min(self.count() - 1, self.currentIndex() + step))
-                self.setCurrentIndex(new_index)
-            event.accept()
-            return True
-        return super().eventFilter(watched, event)
-
-
 class MonthViewWidget(QWidget):
     date_selected = Signal(QDate)
     context_action_requested = Signal(str, dict)
@@ -128,10 +102,14 @@ class MonthViewWidget(QWidget):
         self.occurrences: List[ResolvedOccurrence] = []
         self._holiday_checker: Optional[Callable[[QDate], bool]] = None
         self._cell_dates: Dict[tuple[int, int], QDate] = {}
+        self.time_scale_minutes = 60
+        self._drag_state: Optional[Dict[str, object]] = None
+        self._drag_preview_date: Optional[QDate] = None
 
         self.table = QTableWidget(6, 7)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.NoSelection)
+        self.table.setFocusPolicy(Qt.StrongFocus)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -152,6 +130,9 @@ class MonthViewWidget(QWidget):
             "QHeaderView::section { padding: 0px 4px; font-family: 'Segoe UI'; font-weight: 600; }"
         )
         self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.viewport().setMouseTracking(True)
+        self.table.viewport().installEventFilter(self)
+        self.table.installEventFilter(self)
 
         self.table.setHorizontalHeaderLabels(["週日", "週一", "週二", "週三", "週四", "週五", "週六"])
         self._grouped_events: Dict[QDate, List[ResolvedOccurrence]] = {}
@@ -161,6 +142,10 @@ class MonthViewWidget(QWidget):
         layout.addWidget(self.table)
 
         self._render()
+
+    def set_time_scale(self, minutes: int):
+        if isinstance(minutes, int) and minutes > 0:
+            self.time_scale_minutes = minutes
 
     def set_reference_date(self, qdate: QDate):
         self.reference_date = qdate
@@ -202,17 +187,22 @@ class MonthViewWidget(QWidget):
     def _build_cell_widget(self, qdate: QDate, events: List[ResolvedOccurrence]) -> QWidget:
         container = QWidget()
         is_selected = qdate == self.selected_date
+        is_drag_preview = self._drag_preview_date is not None and qdate == self._drag_preview_date
         is_today = qdate == QDate.currentDate()
         is_holiday = self._is_holiday(qdate)
         is_dark_palette = self.palette().window().color().lightness() < 128
 
-        if is_selected and is_today:
+        if is_drag_preview:
             container.setStyleSheet(
-                "background-color: rgba(47, 115, 217, 0.42); border: 2px solid #f4c542; border-radius: 4px;"
+                "background-color: rgba(245, 158, 11, 0.28); border: 2px solid #d97706; border-radius: 4px;"
+            )
+        elif is_selected and is_today:
+            container.setStyleSheet(
+                "background-color: rgba(56, 142, 60, 0.35); border: 2px solid #f4c542; border-radius: 4px;"
             )
         elif is_selected:
             container.setStyleSheet(
-                "background-color: rgba(47, 115, 217, 0.30); border: 1px solid #2f73d9; border-radius: 4px;"
+                "background-color: rgba(76, 175, 80, 0.25); border: 1px solid #2e7d32; border-radius: 4px;"
             )
         elif is_today:
             container.setStyleSheet(
@@ -318,6 +308,262 @@ class MonthViewWidget(QWidget):
         self.date_selected.emit(qdate)
         self._render()
 
+    def _set_month_cursor(self, mode: Optional[str]):
+        viewport = self.table.viewport()
+        if mode == "move":
+            viewport.setCursor(QCursor(Qt.OpenHandCursor))
+        elif mode in ("resize_start", "resize_end"):
+            viewport.setCursor(QCursor(Qt.SizeHorCursor))
+        else:
+            viewport.unsetCursor()
+
+    def _set_drag_preview_date(self, qdate: Optional[QDate]):
+        if qdate is None and self._drag_preview_date is None:
+            return
+        if qdate is not None and self._drag_preview_date is not None and qdate == self._drag_preview_date:
+            return
+        self._drag_preview_date = qdate
+        self._render()
+
+    def _cell_mode_for_position(self, index, pos) -> str:
+        rect = self.table.visualRect(index)
+        edge = max(8, rect.width() // 6)
+        if pos.x() - rect.left() <= edge:
+            return "resize_start"
+        if rect.right() - pos.x() <= edge:
+            return "resize_end"
+        return "move"
+
+    def _update_month_hover_cursor(self, pos):
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            self._set_month_cursor(None)
+            return
+
+        qdate = self._cell_dates.get((index.row(), index.column()))
+        if qdate is None:
+            self._set_month_cursor(None)
+            return
+
+        events = self._grouped_events.get(qdate, [])
+        if not events:
+            self._set_month_cursor(None)
+            return
+
+        mode = self._cell_mode_for_position(index, pos)
+        self._set_month_cursor(mode)
+
+    def _finalize_month_drag(self, release_pos):
+        if not self._drag_state:
+            return
+
+        state = self._drag_state
+        if not state.get("active", False):
+            self._set_drag_preview_date(None)
+            self._drag_state = None
+            self._set_month_cursor(None)
+            return
+        index = self.table.indexAt(release_pos)
+        if index.isValid():
+            target_date = self._cell_dates.get((index.row(), index.column()), state["source_date"])
+        else:
+            target_date = state["source_date"]
+
+        source_qdate: QDate = state["source_date"]
+        target_qdate: QDate = target_date
+        day_delta = source_qdate.daysTo(target_qdate)
+
+        if day_delta != 0:
+            occurrence: ResolvedOccurrence = state["occurrence"]
+            old_start = occurrence.start
+            old_end = occurrence.end
+            step = timedelta(minutes=max(1, int(self.time_scale_minutes)))
+
+            if state["mode"] == "move":
+                new_start = old_start + timedelta(days=day_delta)
+                new_end = old_end + timedelta(days=day_delta)
+            elif state["mode"] == "resize_start":
+                new_start = old_start + timedelta(days=day_delta)
+                max_start = old_end - step
+                if new_start > max_start:
+                    new_start = max_start
+                new_end = old_end
+            else:
+                new_end = old_end + timedelta(days=day_delta)
+                min_end = old_start + step
+                if new_end < min_end:
+                    new_end = min_end
+                new_start = old_start
+
+            payload = {
+                "schedule_id": occurrence.schedule_id,
+                "start_datetime": new_start.strftime("%Y-%m-%d %H:%M:%S"),
+                "end_datetime": new_end.strftime("%Y-%m-%d %H:%M:%S"),
+                "scale_minutes": int(self.time_scale_minutes),
+                "source": "month_grid",
+            }
+            self.context_action_requested.emit("drag_update", payload)
+
+        self._set_drag_preview_date(None)
+        self._drag_state = None
+        self._set_month_cursor(None)
+
+    def eventFilter(self, watched, event):
+        if watched is self.table and event.type() == QEvent.KeyPress:
+            index = self.table.currentIndex()
+            if not index.isValid():
+                for (row, col), qdate in self._cell_dates.items():
+                    if qdate == self.selected_date:
+                        index = self.table.model().index(row, col)
+                        break
+
+            if index.isValid():
+                qdate = self._cell_dates.get((index.row(), index.column()))
+                if qdate is not None:
+                    key = event.key()
+                    mods = event.modifiers()
+                    if (mods & Qt.ControlModifier) and key == Qt.Key_C:
+                        self._trigger_action_for_date("copy", qdate)
+                        event.accept()
+                        return True
+                    if (mods & Qt.ControlModifier) and key == Qt.Key_V:
+                        self._trigger_action_for_date("paste", qdate)
+                        event.accept()
+                        return True
+                    if key in (Qt.Key_Delete,):
+                        self._trigger_action_for_date("delete", qdate)
+                        event.accept()
+                        return True
+
+        viewport = self.table.viewport()
+        if watched is viewport:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                index = self.table.indexAt(event.pos())
+                if index.isValid():
+                    qdate = self._cell_dates.get((index.row(), index.column()))
+                    if qdate is not None:
+                        events = self._grouped_events.get(qdate, [])
+                        if events:
+                            mode = self._cell_mode_for_position(index, event.pos())
+                            self._drag_state = {
+                                "source_date": qdate,
+                                "mode": mode,
+                                "events": events,
+                                "active": False,
+                                "press_pos": event.pos(),
+                            }
+                            return False
+
+            elif event.type() == QEvent.MouseMove:
+                if self._drag_state:
+                    if not (event.buttons() & Qt.LeftButton):
+                        self._set_drag_preview_date(None)
+                        self._drag_state = None
+                        self._set_month_cursor(None)
+                        return False
+
+                    if not self._drag_state.get("active", False):
+                        press_pos = self._drag_state.get("press_pos")
+                        if press_pos is None:
+                            self._drag_state = None
+                            self._set_month_cursor(None)
+                            return False
+
+                        delta = event.pos() - press_pos
+                        if abs(delta.x()) < 6 and abs(delta.y()) < 6:
+                            return False
+
+                        source_qdate: QDate = self._drag_state["source_date"]
+                        events: List[ResolvedOccurrence] = list(self._drag_state.get("events", []))
+                        picked = self._pick_events(source_qdate, events, "拖曳調整", allow_multi=False)
+                        if not picked:
+                            self._set_drag_preview_date(None)
+                            self._drag_state = None
+                            self._set_month_cursor(None)
+                            return False
+                        occurrence = picked[0]
+
+                        self._drag_state["occurrence"] = occurrence
+                        self._drag_state["active"] = True
+
+                    mode = str(self._drag_state.get("mode", "move"))
+                    index = self.table.indexAt(event.pos())
+                    if index.isValid():
+                        target_date = self._cell_dates.get((index.row(), index.column()))
+                    else:
+                        target_date = self._drag_state.get("source_date")
+                    if isinstance(target_date, QDate):
+                        self._set_drag_preview_date(target_date)
+
+                    if mode == "move":
+                        self.table.viewport().setCursor(QCursor(Qt.ClosedHandCursor))
+                    else:
+                        self._set_month_cursor(mode)
+                    event.accept()
+                    return True
+                self._update_month_hover_cursor(event.pos())
+
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._drag_state:
+                    if not self._drag_state.get("active", False):
+                        self._set_drag_preview_date(None)
+                        self._drag_state = None
+                        self._set_month_cursor(None)
+                        return False
+                    self._finalize_month_drag(event.pos())
+                    event.accept()
+                    return True
+
+            elif event.type() == QEvent.Leave:
+                if not self._drag_state:
+                    self._set_drag_preview_date(None)
+                    self._set_month_cursor(None)
+
+        return super().eventFilter(watched, event)
+
+    def _trigger_action_for_date(self, action: str, qdate: QDate):
+        events = self._grouped_events.get(qdate, [])
+        first_event = events[0] if events else None
+        payload = {
+            "schedule_id": first_event.schedule_id if first_event else None,
+            "date": qdate.toString("yyyy-MM-dd"),
+            "hour": first_event.start.hour if first_event else 8,
+            "minute": first_event.start.minute if first_event else 0,
+            "week_mode": False,
+            "month_mode": True,
+        }
+
+        if action == "copy":
+            if first_event is None:
+                return
+            targets = self._pick_events(qdate, events, "複製", allow_multi=True)
+            if not targets:
+                return
+            first = targets[0]
+            payload["schedule_id"] = first.schedule_id
+            payload["schedule_ids"] = [t.schedule_id for t in targets]
+            payload["hour"] = first.start.hour
+            payload["minute"] = first.start.minute
+            self.context_action_requested.emit("copy", payload)
+            return
+
+        if action == "paste":
+            self.context_action_requested.emit("paste", payload)
+            return
+
+        if action == "delete":
+            if first_event is None:
+                return
+            targets = self._pick_events(qdate, events, "刪除", allow_multi=True)
+            if not targets:
+                return
+            first = targets[0]
+            payload["schedule_id"] = first.schedule_id
+            payload["schedule_ids"] = [t.schedule_id for t in targets]
+            payload["hour"] = first.start.hour
+            payload["minute"] = first.start.minute
+            self.context_action_requested.emit("delete", payload)
+
     def _on_chip_double_clicked(self, qdate: QDate, occurrence: ResolvedOccurrence):
         """雙擊任務 chip 時編輯該任務。"""
         payload = {
@@ -332,9 +578,10 @@ class MonthViewWidget(QWidget):
     def _on_merged_label_double_clicked(self, qdate: QDate):
         """雙擊合併任務區塊時，先讓使用者選擇目標任務再編輯。"""
         events = self._grouped_events.get(qdate, [])
-        target = self._pick_event(qdate, events, "編輯")
-        if target is None:
+        targets = self._pick_events(qdate, events, "編輯", allow_multi=False)
+        if not targets:
             return
+        target = targets[0]
 
         payload = {
             "schedule_id": target.schedule_id,
@@ -345,12 +592,13 @@ class MonthViewWidget(QWidget):
         }
         self.context_action_requested.emit("edit", payload)
 
-    def _pick_event(self, qdate: QDate, events: List[ResolvedOccurrence], action_text: str) -> ResolvedOccurrence | None:
-        """同一天多筆任務時，讓使用者選擇目標任務。"""
+    def _pick_events(self, qdate: QDate, events: List[ResolvedOccurrence], action_text: str, allow_multi: bool = False) -> list[ResolvedOccurrence] | None:
+        """同一天多筆任務時，讓使用者選擇目標任務（可多選）。"""
+        events = sorted(events, key=lambda occ: occ.start)
         if not events:
             return None
         if len(events) == 1:
-            return events[0]
+            return [events[0]]
 
         option_map: Dict[str, ResolvedOccurrence] = {}
         options: List[str] = []
@@ -373,28 +621,43 @@ class MonthViewWidget(QWidget):
         prompt = QLabel(f"{qdate.toString('yyyy-MM-dd')} 有多筆任務，請選擇：")
         layout.addWidget(prompt)
 
-        combo = WheelSelectComboBox(dialog)
-        combo.setEditable(False)
-        combo.setMaxVisibleItems(10)
-        combo.addItems(options)
-        combo.setCurrentIndex(0)
-        if len(options) > 10:
-            combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        options_list = WheelSelectListWidget(dialog)
+        options_list.addItems(options)
+        options_list.setCurrentRow(0)
+        options_list.setSelectionMode(QListWidget.ExtendedSelection if allow_multi else QListWidget.SingleSelection)
+        options_list.set_hover_select_enabled(not allow_multi)
+        options_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        row_height = max(24, options_list.fontMetrics().height() + 10)
+        options_list.setStyleSheet(f"QListWidget::item {{ min-height: {row_height}px; max-height: {row_height}px; }}")
+        frame = options_list.frameWidth() * 2
+        options_list.setFixedHeight((row_height * 10) + frame)
+        layout.addWidget(options_list)
+        if allow_multi:
+            tips = QLabel("提示：Ctrl 可不連續多選、Shift 可連續多選，選好後按 OK")
+            layout.addWidget(tips)
+            select_all_shortcut = QShortcut(QKeySequence("Ctrl+A"), dialog)
+            select_all_shortcut.activated.connect(options_list.selectAll)
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
         else:
-            combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        layout.addWidget(combo)
+            options_list.itemClicked.connect(lambda _item: dialog.accept())
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        options_list.setFocus(Qt.OtherFocusReason)
 
         if dialog.exec() != QDialog.Accepted:
             return None
-        selected = combo.currentText()
-        if not selected:
+        selected_items = options_list.selectedItems() if allow_multi else [options_list.currentItem()]
+        if allow_multi and not selected_items:
+            current = options_list.currentItem()
+            if current is not None:
+                selected_items = [current]
+        labels = [item.text() for item in selected_items if item is not None and item.text()]
+        if not labels:
             return None
-        return option_map.get(selected)
+        targets = [option_map[label] for label in labels if label in option_map]
+        return targets or None
 
     def _show_context_menu(self, position):
         index = self.table.indexAt(position)
@@ -414,21 +677,20 @@ class MonthViewWidget(QWidget):
             "schedule_id": first_event.schedule_id if first_event else None,
             "date": qdate.toString("yyyy-MM-dd"),
             "hour": first_event.start.hour if first_event else 8,
+            "minute": first_event.start.minute if first_event else 0,
             "week_mode": False,
             "month_mode": True,
         }
 
         menu = QMenu(self)
-        new_action = menu.addAction("新增行程 (New Appointment)")
-        edit_action = menu.addAction("編輯行程 (Edit)")
+        new_action = menu.addAction("新增行程 (New)")
+        copy_action = menu.addAction("複製行程 (Copy)")
+        paste_action = menu.addAction("貼上行程 (Paste)")
         delete_action = menu.addAction("刪除行程 (Delete)")
-        menu.addSeparator()
-        today_action = menu.addAction("移至今天 (Go to Today)")
-        refresh_action = menu.addAction("重新整理 (Refresh)")
 
         has_event = first_event is not None
-        edit_action.setEnabled(has_event)
         delete_action.setEnabled(has_event)
+        copy_action.setEnabled(has_event)
 
         selected_action = menu.exec(self.table.viewport().mapToGlobal(position))
         if selected_action is None:
@@ -436,21 +698,25 @@ class MonthViewWidget(QWidget):
 
         if selected_action == new_action:
             self.context_action_requested.emit("new", payload)
-        elif selected_action == edit_action:
-            target = self._pick_event(qdate, events, "編輯")
-            if target is None:
+        elif selected_action == copy_action:
+            targets = self._pick_events(qdate, events, "複製", allow_multi=True)
+            if not targets:
                 return
-            payload["schedule_id"] = target.schedule_id
-            payload["hour"] = target.start.hour
-            self.context_action_requested.emit("edit", payload)
+            first = targets[0]
+            payload["schedule_id"] = first.schedule_id
+            payload["schedule_ids"] = [t.schedule_id for t in targets]
+            payload["hour"] = first.start.hour
+            payload["minute"] = first.start.minute
+            self.context_action_requested.emit("copy", payload)
+        elif selected_action == paste_action:
+            self.context_action_requested.emit("paste", payload)
         elif selected_action == delete_action:
-            target = self._pick_event(qdate, events, "刪除")
-            if target is None:
+            targets = self._pick_events(qdate, events, "刪除", allow_multi=True)
+            if not targets:
                 return
-            payload["schedule_id"] = target.schedule_id
-            payload["hour"] = target.start.hour
+            first = targets[0]
+            payload["schedule_id"] = first.schedule_id
+            payload["schedule_ids"] = [t.schedule_id for t in targets]
+            payload["hour"] = first.start.hour
+            payload["minute"] = first.start.minute
             self.context_action_requested.emit("delete", payload)
-        elif selected_action == today_action:
-            self.context_action_requested.emit("today", payload)
-        elif selected_action == refresh_action:
-            self.context_action_requested.emit("refresh", payload)
