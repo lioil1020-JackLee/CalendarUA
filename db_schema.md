@@ -1,12 +1,10 @@
-## CalendarUA 資料庫結構（SQLite）
+﻿## CalendarUA 資料庫結構（SQLite）
 
 預設資料庫檔案：`database/calendarua.db`
 
-本文件描述目前主要資料表、關鍵欄位與用途。
+本文件以 `database/sqlite_manager.py` 的實際建表與遷移邏輯為準。
 
----
-
-### 1) schedules（排程主表）
+## 1. `schedules`（排程主表）
 
 一筆代表一條排程系列。
 
@@ -23,30 +21,27 @@
 - `opc_security_mode TEXT DEFAULT 'None'`
 - `opc_username TEXT DEFAULT ''`
 - `opc_password TEXT DEFAULT ''`
-- `opc_timeout INTEGER DEFAULT 5`
+- `opc_timeout INTEGER DEFAULT 10`（遷移邏輯可能補成 5，依既有 DB 而定）
 - `opc_write_timeout INTEGER DEFAULT 3`
 - `lock_enabled INTEGER DEFAULT 0`
 - `is_enabled INTEGER DEFAULT 1`
 - `ignore_holiday INTEGER DEFAULT 0`
-- `category_id INTEGER DEFAULT 1`
 - `priority INTEGER DEFAULT 1`
 - `location TEXT DEFAULT ''`
 - `description TEXT DEFAULT ''`
-- `last_execution_status TEXT`
+- `last_execution_status TEXT DEFAULT ''`
 - `last_execution_time TIMESTAMP`
 - `next_execution_time TIMESTAMP`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
-索引（常用）：
+索引：
 
 - `idx_schedules_enabled (is_enabled)`
 - `idx_schedules_node_id (node_id)`
 - `idx_schedules_next_time (next_execution_time)`
 
----
-
-### 2) schedule_exceptions（單次例外）
+## 2. `schedule_exceptions`（單次例外）
 
 覆寫或取消特定 occurrence。
 
@@ -60,18 +55,15 @@
 - `override_end TEXT`
 - `override_task_name TEXT`
 - `override_target_value TEXT`
-- `override_category_id INTEGER`
 - `note TEXT DEFAULT ''`
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
-索引（常用）：
+索引：
 
 - `idx_schedule_exceptions_schedule_date (schedule_id, occurrence_date)`
 
----
-
-### 3) holidays（假日規則）
+## 3. `holidays`（假日規則單表）
 
 整合每週假日與固定月日假日。
 
@@ -79,7 +71,7 @@
 
 - `id INTEGER PRIMARY KEY AUTOINCREMENT`
 - `entry_type TEXT NOT NULL`（`weekday` / `date`）
-- `calendar_type TEXT`（`solar` / `lunar`，僅 `date` 使用）
+- `calendar_type TEXT`（`solar` / `lunar`，僅 `entry_type='date'` 使用）
 - `month INTEGER`
 - `day INTEGER`
 - `weekday INTEGER`（1=週一 ... 7=週日）
@@ -89,26 +81,18 @@
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
----
+唯一索引：
 
-### 4) schedule_categories（分類顏色）
+- `idx_holidays_unique_weekday (entry_type, weekday) WHERE entry_type='weekday'`
+- `idx_holidays_unique_date (entry_type, calendar_type, month, day) WHERE entry_type='date'`
 
-主要欄位：
+一般索引：
 
-- `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `name TEXT UNIQUE NOT NULL`
-- `bg_color TEXT NOT NULL`
-- `fg_color TEXT NOT NULL`
-- `sort_order INTEGER DEFAULT 0`
-- `is_system INTEGER DEFAULT 0`
-- `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
-- `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+- `idx_holidays_enabled (is_enabled)`
 
----
+## 4. `general_settings`（全域設定）
 
-### 5) general_settings（全域設定）
-
-通常只有一筆，保存 UI/系統層級設定。
+通常只有一筆，保存 UI/系統層設定。
 
 主要欄位：
 
@@ -137,9 +121,7 @@
 
 `time_scale_minutes` 允許值：`5, 6, 10, 15, 30, 60`
 
----
-
-### 6) runtime_override（執行期覆寫）
+## 5. `runtime_override`（執行期覆寫）
 
 主要欄位：
 
@@ -149,8 +131,12 @@
 - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - `updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 
----
+## 6. 遷移說明
 
-## 遷移說明
+`SQLiteManager.init_db()` 會先建表，再呼叫 `_migrate_db()`：
 
-`database/sqlite_manager.py` 的 `_migrate_db()` 會在啟動時自動補齊缺欄位/缺表。
+- 補齊舊版缺欄位（例如 `priority`、`location`、`description`、`note`）。
+- 將舊版 `holiday_entries` 資料轉入新 `holidays` 單表。
+- 若假日規則為空，補入預設週假日與常見國/農曆固定日期。
+
+建議：升級版本時不要手動刪表，讓啟動遷移自動補齊即可。

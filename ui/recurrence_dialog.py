@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QLabel,
     QComboBox,
-    QSpinBox,
     QCheckBox,
     QPushButton,
     QDateEdit,
@@ -19,7 +18,6 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QButtonGroup,
     QGridLayout,
-    QTimeEdit,
     QFrame,
     QMessageBox,
     QToolButton,
@@ -28,67 +26,12 @@ from PySide6.QtWidgets import (
     QStyle,
 )
 from PySide6.QtCore import Qt, QDate, QTime, Signal, QEvent, QSize, QLocale, QPoint, QTimer
-from PySide6.QtGui import QFont, QIcon, QColor
+from PySide6.QtGui import QFont, QColor
 import sys
-import os
 from datetime import date as dt_date
 
-from core.lunar_calendar import to_lunar
-
-
-def get_app_icon():
-    """獲取應用程式圖示，支援打包環境"""
-    # 優先檢查打包環境中的圖示
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 打包環境
-        base_path = sys._MEIPASS
-        icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
-        icon_path = os.path.join(base_path, icon_name)
-        if os.path.exists(icon_path):
-            return QIcon(icon_path)
-
-    # 開發環境：檢查當前目錄
-    icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
-    if os.path.exists(icon_name):
-        return QIcon(icon_name)
-
-    # 預設圖示
-    return QIcon()
-
-
-def _format_lunar_day_text(info) -> str:
-    n = info.lunar_day
-    chinese_ten = ["初", "十", "廿", "卅"]
-    numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
-    if n <= 0 or n > 30:
-        return ""
-    if n == 1:
-        month_names = {
-            1: "元",
-            2: "二",
-            3: "三",
-            4: "四",
-            5: "五",
-            6: "六",
-            7: "七",
-            8: "八",
-            9: "九",
-            10: "十",
-            11: "十一",
-            12: "十二",
-        }
-        month_text = month_names.get(info.lunar_month, str(info.lunar_month))
-        leap_prefix = "閏" if info.is_leap_month else ""
-        return f"{leap_prefix}{month_text}月"
-    if n == 10:
-        return "初十"
-    if n == 20:
-        return "二十"
-    if n == 30:
-        return "三十"
-    ten = chinese_ten[(n - 1) // 10]
-    digit = numerals[(n - 1) % 10]
-    return f"{ten}{digit}"
+from core.lunar_calendar import to_lunar, format_lunar_day_text
+from ui.app_icon import get_app_icon
 
 
 def _combo_steps_from_wheel(event) -> int:
@@ -301,7 +244,7 @@ class DropdownNavCalendar(QCalendarWidget):
         try:
             lunar_info = to_lunar(dt_date(date.year(), date.month(), date.day()))
             if lunar_info:
-                lunar_text = _format_lunar_day_text(lunar_info)
+                lunar_text = format_lunar_day_text(lunar_info)
         except Exception:
             lunar_text = ""
 
@@ -849,11 +792,11 @@ class RecurrenceDialog(QDialog):
         self.start_time_combo.setFixedWidth(130)
         self._populate_time_combo(self.start_time_combo)
         if self.start_time_combo.lineEdit() is not None:
-            self.start_time_combo.lineEdit().setReadOnly(True)
+            self.start_time_combo.lineEdit().setReadOnly(False)
             self.start_time_combo.lineEdit().setAlignment(Qt.AlignCenter)
-            self.start_time_combo.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.start_time_combo.lineEdit().setCursor(Qt.IBeamCursor)
         self.start_time_combo.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(self.start_time_combo, 0, 1)
+        layout.addWidget(self._build_combo_with_side_arrows(self.start_time_combo), 0, 1)
 
         # 結束時間
         end_label = QLabel("結束(N):")
@@ -866,11 +809,11 @@ class RecurrenceDialog(QDialog):
         self.end_time_combo.setFixedWidth(130)
         self._populate_time_combo(self.end_time_combo)
         if self.end_time_combo.lineEdit() is not None:
-            self.end_time_combo.lineEdit().setReadOnly(True)
+            self.end_time_combo.lineEdit().setReadOnly(False)
             self.end_time_combo.lineEdit().setAlignment(Qt.AlignCenter)
-            self.end_time_combo.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.end_time_combo.lineEdit().setCursor(Qt.IBeamCursor)
         self.end_time_combo.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(self.end_time_combo, 1, 1)
+        layout.addWidget(self._build_combo_with_side_arrows(self.end_time_combo), 1, 1)
 
         # 期間
         duration_label = QLabel("期間(U):")
@@ -884,18 +827,59 @@ class RecurrenceDialog(QDialog):
         self.duration_combo.setFixedWidth(130)
         self.update_duration_combo()
         if self.duration_combo.lineEdit() is not None:
-            self.duration_combo.lineEdit().setReadOnly(True)
+            self.duration_combo.lineEdit().setReadOnly(False)
             self.duration_combo.lineEdit().setAlignment(Qt.AlignCenter)
-            self.duration_combo.lineEdit().setCursor(Qt.PointingHandCursor)
+            self.duration_combo.lineEdit().setCursor(Qt.IBeamCursor)
         self.duration_combo.setCursor(Qt.PointingHandCursor)
-        layout.addWidget(self.duration_combo, 2, 1)
+        layout.addWidget(self._build_combo_with_side_arrows(self.duration_combo), 2, 1)
 
         self.lock_checkbox = QCheckBox("Lock")
         self.lock_checkbox.setToolTip("勾選後在開始到結束期間持續鎖定 OPC UA Tag 值")
         layout.addWidget(self.lock_checkbox, 0, 2, 3, 1, alignment=Qt.AlignLeft | Qt.AlignTop)
 
+        self.time_guide_label = QLabel(
+            "操作方式:\n"
+            "1. 點右側箭頭: 展開下拉選單\n"
+            "2. 點中間文字區: 直接鍵入\n"
+            "3. 雙擊中間文字區: 以滑鼠拖曳選取文字\n"
+            "4. Lock: 在開始到結束期間持續鎖定 OPC UA Tag 值"
+        )
+        self.time_guide_label.setWordWrap(True)
+        self.time_guide_label.setObjectName("timeGuideLabel")
+        layout.addWidget(self.time_guide_label, 0, 3, 3, 1, alignment=Qt.AlignTop)
+        self._apply_time_guide_label_style()
+
         layout.setColumnStretch(2, 1)
+        layout.setColumnStretch(3, 2)
         return group
+
+    def _build_combo_with_side_arrows(self, combo: QComboBox) -> QWidget:
+        """建立右側箭頭 + 中央可輸入的複合控件。"""
+        container = QWidget(self)
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+
+        right_btn = QToolButton(container)
+        right_btn.setText("▼")
+        right_btn.setToolTip("展開選單")
+        right_btn.setCursor(Qt.PointingHandCursor)
+        right_btn.setAutoRaise(True)
+        right_btn.setFixedWidth(20)
+        right_btn.clicked.connect(combo.showPopup)
+
+        row.addWidget(combo)
+        row.addWidget(right_btn)
+        return container
+
+    def _apply_time_guide_label_style(self):
+        """依主題更新右側操作說明文字顏色。"""
+        if not hasattr(self, "time_guide_label"):
+            return
+        if self.is_dark_mode():
+            self.time_guide_label.setStyleSheet("color: #ffffff;")
+        else:
+            self.time_guide_label.setStyleSheet("color: #666666;")
 
     def _populate_time_combo(self, combo: QComboBox):
         """填入 00:00 ~ 23:30（每 30 分）時間選項，下拉顯示 HH:mm。"""
@@ -1870,7 +1854,7 @@ class RecurrenceDialog(QDialog):
                     try:
                         num = float(s.replace(unit, '').strip())
                         return int(num * factor)
-                    except:
+                    except (TypeError, ValueError):
                         return None
         except Exception:
             return None
@@ -2327,6 +2311,7 @@ class RecurrenceDialog(QDialog):
             self.start_date_edit._calendar_popup.apply_theme(is_dark)
         if hasattr(self, "end_date_edit") and hasattr(self.end_date_edit, "_calendar_popup"):
             self.end_date_edit._calendar_popup.apply_theme(is_dark)
+        self._apply_time_guide_label_style()
 
     def get_rrule(self) -> str:
         """取得 RRULE 字串"""
@@ -2363,10 +2348,20 @@ class RecurrenceDialog(QDialog):
 
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
             for combo, line_edit in combo_pairs:
-                if obj in (combo, line_edit) and combo.isEnabled():
+                # 點擊 combo 本體時直接展開清單；lineEdit 保留原生游標/選取/編輯行為。
+                if obj is combo and combo.isEnabled():
                     QTimer.singleShot(0, combo.showPopup)
                     event.accept()
                     return True
+
+                # 點擊 lineEdit 左右邊緣時展開；中間區域交給原生編輯行為。
+                if obj is line_edit and combo.isEnabled():
+                    x_pos = int(event.position().x()) if hasattr(event, "position") else int(event.x())
+                    side_zone = 18
+                    if x_pos >= max(side_zone, line_edit.width() - side_zone):
+                        QTimer.singleShot(0, combo.showPopup)
+                        event.accept()
+                        return True
 
         if event.type() == QEvent.Wheel:
             combo = wheel_targets.get(obj)
@@ -2390,36 +2385,6 @@ class RecurrenceDialog(QDialog):
                         combo.setCurrentIndex(target_index)
                 event.accept()
                 return True
-
-        if obj in [self.start_time_combo.lineEdit(), self.end_time_combo.lineEdit()]:
-            if event.type() == QEvent.KeyPress:
-                line_edit = obj
-                cursor_pos = line_edit.cursorPosition()
-
-                # 處理刪除和退格鍵，使用更直接的方法
-                if event.key() == Qt.Key_Delete:
-                    # Delete鍵：刪除游標後的字符
-                    text = line_edit.text()
-                    if cursor_pos < len(text):
-                        new_text = text[:cursor_pos] + text[cursor_pos + 1:]
-                        line_edit.setText(new_text)
-                        line_edit.setCursorPosition(cursor_pos)
-                    event.accept()
-                    return True
-
-                elif event.key() == Qt.Key_Backspace:
-                    # Backspace鍵：刪除游標前的字符
-                    text = line_edit.text()
-                    if cursor_pos > 0:
-                        new_text = text[: cursor_pos - 1] + text[cursor_pos:]
-                        line_edit.setText(new_text)
-                        line_edit.setCursorPosition(cursor_pos - 1)
-                    event.accept()
-                    return True
-
-                # 對於其他鍵盤事件，讓預設處理繼續
-                elif event.key() in [Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End]:
-                    return False
 
         return super().eventFilter(obj, event)
 

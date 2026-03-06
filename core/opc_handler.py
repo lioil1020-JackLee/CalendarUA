@@ -3,7 +3,6 @@ import os
 from typing import Optional, Any, Union
 from asyncua import Client, ua
 from asyncua.common.node import Node
-from asyncua.crypto.security_policies import SecurityPolicyBasic256Sha256
 import logging
 
 logging.basicConfig(level=logging.WARNING)
@@ -182,7 +181,7 @@ class OPCHandler:
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, _exc_type, _exc_val, _exc_tb):
         """非同步上下文管理器退出"""
         await self.disconnect()
 
@@ -469,8 +468,6 @@ class OPCHandler:
 
             # 優先使用 VariantType
             try:
-                from asyncua.ua import VariantType
-
                 variant_type = await node.read_data_type_as_variant_type()
                 return self._map_variant_type_to_simple_type(variant_type)
             except Exception:

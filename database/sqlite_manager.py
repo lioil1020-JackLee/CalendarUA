@@ -6,7 +6,6 @@ SQLite 資料庫管理模組
 import sqlite3
 import logging
 from pathlib import Path
-import os
 from typing import List, Dict, Optional, Any
 from contextlib import contextmanager
 from datetime import datetime

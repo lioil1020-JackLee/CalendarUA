@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, date, timedelta
+from datetime import date, timedelta
 from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import QDate, Qt, Signal, QEvent
-from PySide6.QtGui import QCursor, QFont, QColor, QKeySequence, QShortcut
+from PySide6.QtGui import QCursor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.schedule_resolver import ResolvedOccurrence
-from core.lunar_calendar import to_lunar, LunarDateInfo
+from core.lunar_calendar import to_lunar, format_lunar_day_text
 from ui.wheel_select_list import WheelSelectListWidget
 
 
@@ -27,42 +27,6 @@ def _month_grid_start(month_date: QDate) -> QDate:
     first_day = QDate(month_date.year(), month_date.month(), 1)
     days_to_sunday = first_day.dayOfWeek() % 7
     return first_day.addDays(-days_to_sunday)
-
-
-def _format_lunar_day(info: LunarDateInfo) -> str:
-    """將農曆日轉成簡短中文（初一、十五等），若無法判定則回傳空字串。"""
-    n = info.lunar_day
-    chinese_ten = ["初", "十", "廿", "卅"]
-    numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
-    if n <= 0 or n > 30:
-        return ""
-    if n == 1:
-        month_names = {
-            1: "元",
-            2: "二",
-            3: "三",
-            4: "四",
-            5: "五",
-            6: "六",
-            7: "七",
-            8: "八",
-            9: "九",
-            10: "十",
-            11: "十一",
-            12: "十二",
-        }
-        month_text = month_names.get(info.lunar_month, str(info.lunar_month))
-        leap_prefix = "閏" if info.is_leap_month else ""
-        return f"{leap_prefix}{month_text}月"
-    if n == 10:
-        return "初十"
-    if n == 20:
-        return "二十"
-    if n == 30:
-        return "三十"
-    ten = chinese_ten[(n - 1) // 10]
-    digit = numerals[(n - 1) % 10]
-    return f"{ten}{digit}"
 
 
 class EventChipLabel(QLabel):
@@ -218,7 +182,7 @@ class MonthViewWidget(QWidget):
         try:
             info = to_lunar(date(qdate.year(), qdate.month(), qdate.day()))
             if info:
-                lunar_text = _format_lunar_day(info)
+                lunar_text = format_lunar_day_text(info)
         except Exception:
             lunar_text = ""
 

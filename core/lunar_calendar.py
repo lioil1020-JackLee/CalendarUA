@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional, Dict, Any
+from typing import Optional
 
 
 @dataclass
@@ -89,50 +89,39 @@ def to_lunar(gregorian: date) -> Optional[LunarDateInfo]:
         return None
 
 
-def from_lunar(year: int, month: int, day: int, leap: bool = False) -> Optional[date]:
-    """
-    將農曆年月日轉為西曆日期。
-    若無農曆套件或轉換失敗，回傳 None。
-    """
-    backend, name = _load_backend()
-    if backend is None:
-        return None
+def format_lunar_day_text(info: LunarDateInfo) -> str:
+    """將農曆日轉換成 UI 顯示文字（如初一、十五、閏二月）。"""
+    n = info.lunar_day
+    if n <= 0 or n > 30:
+        return ""
 
-    try:
-        if name == "lunardate":
-            solar = backend.LunarDate(year, month, day, leap).toSolarDate()
-            return date(solar.year, solar.month, solar.day)
+    if n == 1:
+        month_names = {
+            1: "元",
+            2: "二",
+            3: "三",
+            4: "四",
+            5: "五",
+            6: "六",
+            7: "七",
+            8: "八",
+            9: "九",
+            10: "十",
+            11: "十一",
+            12: "十二",
+        }
+        month_text = month_names.get(info.lunar_month, str(info.lunar_month))
+        leap_prefix = "閏" if info.is_leap_month else ""
+        return f"{leap_prefix}{month_text}月"
 
-        lunar = backend.Lunar(year, month, day, isleap=leap)  # type: ignore[attr-defined]
-        solar = backend.Converter.Lunar2Solar(lunar)
-        return date(solar.year, solar.month, solar.day)
-    except Exception:
-        return None
+    if n == 10:
+        return "初十"
+    if n == 20:
+        return "二十"
+    if n == 30:
+        return "三十"
 
-
-def get_almanac_info(gregorian: date) -> Dict[str, Any]:
-    """
-    取得指定西曆日期的農民曆資訊（宜/忌、節氣等）。
-
-    回傳格式範例：
-    {
-        "yi": "嫁娶 開市 ...",
-        "ji": "動土 安葬 ...",
-        "solar_term": "清明",
-        "lunar_text": "農曆二月初三",
-    }
-
-    若無後端支援，回傳空 dict。
-    """
-    backend, name = _load_backend()
-    if backend is None:
-        return {}
-
-    # 這裡僅示意，實際實作需依照選用的農民曆套件 API 來寫
-    try:
-        info: Dict[str, Any] = {}
-        # 假設 backend 提供類似 API，可在此填入實作
-        return info
-    except Exception:
-        return {}
+    chinese_ten = ["初", "十", "廿", "卅"]
+    numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+    return f"{chinese_ten[(n - 1) // 10]}{numerals[(n - 1) % 10]}"
 

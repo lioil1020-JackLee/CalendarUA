@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QStyle,
     QDialog,
     QComboBox,
-    QSpinBox,
     QStatusBar,
     QToolBar,
     QTreeWidget,
@@ -49,7 +48,7 @@ from PySide6.QtWidgets import (
     QToolButton,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QDate, QSize, QLocale, QTime, QEvent
-from PySide6.QtGui import QAction, QIcon, QFont, QColor, QGuiApplication
+from PySide6.QtGui import QAction, QFont, QColor, QGuiApplication
 import qasync
 import re
 from datetime import date as dt_date
@@ -64,67 +63,8 @@ from ui.holiday_settings_dialog import HolidaySettingsDialog
 from ui.combo_wheel_helper import attach_combo_wheel_behavior
 from ui.schedule_canvas import DayViewWidget, WeekViewWidget
 from ui.month_grid import MonthViewWidget
-from core.lunar_calendar import to_lunar, LunarDateInfo
-
-
-def _format_lunar_day_text(info: LunarDateInfo) -> str:
-    """將農曆日轉為中文（初一、十五、三十）。"""
-    n = info.lunar_day
-    if n <= 0 or n > 30:
-        return ""
-
-    if n == 1:
-        month_names = {
-            1: "元",
-            2: "二",
-            3: "三",
-            4: "四",
-            5: "五",
-            6: "六",
-            7: "七",
-            8: "八",
-            9: "九",
-            10: "十",
-            11: "十一",
-            12: "十二",
-        }
-        month_text = month_names.get(info.lunar_month, str(info.lunar_month))
-        leap_prefix = "閏" if info.is_leap_month else ""
-        return f"{leap_prefix}{month_text}月"
-
-    if n == 10:
-        return "初十"
-    if n == 20:
-        return "二十"
-    if n == 30:
-        return "三十"
-
-    chinese_ten = ["初", "十", "廿", "卅"]
-    numerals = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
-    return f"{chinese_ten[(n - 1) // 10]}{numerals[(n - 1) % 10]}"
-
-
-def get_app_icon():
-    """獲取應用程式圖示，支援打包環境"""
-    import sys
-    import os
-
-    # 優先檢查打包環境中的圖示
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 打包環境
-        base_path = sys._MEIPASS
-        icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
-        icon_path = os.path.join(base_path, icon_name)
-        if os.path.exists(icon_path):
-            return QIcon(icon_path)
-
-    # 開發環境：檢查當前目錄
-    icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
-    if os.path.exists(icon_name):
-        return QIcon(icon_name)
-
-    # 預設圖示
-    return QIcon()
+from core.lunar_calendar import to_lunar, format_lunar_day_text
+from ui.app_icon import get_app_icon
 
 
 class NavCalendarWidget(QCalendarWidget):
@@ -188,7 +128,6 @@ class NavCalendarWidget(QCalendarWidget):
         next_month = first.addMonths(1)
 
         is_prev = (clicked.year() == prev_month.year() and clicked.month() == prev_month.month())
-        is_this = (clicked.year() == shown_year and clicked.month() == shown_month)
         is_next = (clicked.year() == next_month.year() and clicked.month() == next_month.month())
 
         # 對應 paintCell 的「隱藏交界格」規則：這些格子應該完全無效
@@ -246,7 +185,7 @@ class NavCalendarWidget(QCalendarWidget):
         try:
             lunar_info = to_lunar(dt_date(date.year(), date.month(), date.day()))
             if lunar_info:
-                lunar_text = _format_lunar_day_text(lunar_info)
+                lunar_text = format_lunar_day_text(lunar_info)
         except Exception:
             lunar_text = ""
 
@@ -1497,15 +1436,13 @@ class CalendarUA(QMainWindow):
 
     def setup_theme_listener(self):
         """設定系統主題監聽"""
-        # 在 Windows 上監聽系統主題變化
+        # 在 Windows 上定時檢查系統主題變化
         try:
-            import winreg
-
             self._theme_timer = QTimer(self)
             self._theme_timer.timeout.connect(self.check_system_theme)
             self._theme_timer.start(2000)  # 每2秒檢查一次
             self._last_theme = self.is_system_dark_mode()
-        except ImportError:
+        except Exception:
             pass
 
     def is_system_dark_mode(self) -> bool:
@@ -2411,7 +2348,7 @@ class CalendarUA(QMainWindow):
                 self.db_status_label.setStyleSheet("color: red;")
 
         except Exception as e:
-            self.db_status_label.setText(f"資料庫: 連線失敗")
+            self.db_status_label.setText("資料庫: 連線失敗")
             self.db_status_label.setStyleSheet("color: red;")
             self.db_manager = None
             QMessageBox.warning(
@@ -3975,7 +3912,7 @@ class OPCNodeBrowserDialog(QDialog):
                 root_item.setData(0, self._ROLE_CHILDREN_LOADING, True)
 
                 # 僅載入第一層，深層在使用者點擊/展開時再載入
-                await self._async_load_child_nodes(objects, root_item, depth=0)
+                await self._async_load_child_nodes(objects, root_item)
                 root_item.setData(0, self._ROLE_CHILDREN_LOADED, True)
                 root_item.setData(0, self._ROLE_CHILDREN_LOADING, False)
                 root_item.setExpanded(True)
@@ -3989,7 +3926,7 @@ class OPCNodeBrowserDialog(QDialog):
             self.status_label.setText(f"載入節點錯誤: {str(e)}")
             self.status_label.setStyleSheet("color: red;")
 
-    async def _async_load_child_nodes(self, parent_node, parent_item, depth=0):
+    async def _async_load_child_nodes(self, parent_node, parent_item):
         """異步載入指定節點的直屬子節點（單層）。"""
         if parent_item is None:
             return
@@ -4184,7 +4121,7 @@ class OPCNodeBrowserDialog(QDialog):
 
         item.setData(0, self._ROLE_CHILDREN_LOADING, True)
         node = self.opc_handler.client.get_node(node_id)
-        await self._async_load_child_nodes(node, item, depth=0)
+        await self._async_load_child_nodes(node, item)
 
     def on_item_clicked(self, item, column):
         self._request_load_children(item)
@@ -4909,7 +4846,6 @@ class OPCSettingsDialog(QDialog):
 
     def on_auth_mode_changed(self):
         # 當選擇 Anonymous 時隱藏/停用其他認證欄位
-        is_anonymous = self.rb_anonymous.isChecked()
         is_username = self.rb_username.isChecked()
 
         # Username/password visible only when username radio selected
@@ -5038,7 +4974,7 @@ class OPCSettingsDialog(QDialog):
                 
                 # 如果還是沒有找到策略，至少報告所有找到的內容
                 if not supported_policies:
-                    print(f"[OPC UA 檢測] 警告: 未找到有效的安全策略")
+                    print("[OPC UA 檢測] 警告: 未找到有效的安全策略")
                     
             finally:
                 asyncua_logger.removeHandler(handler)

@@ -17,32 +17,10 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon
-import os
 from pathlib import Path
 from datetime import datetime
 from database.sqlite_manager import SQLiteManager
-
-
-def get_app_icon():
-    """獲取應用程式圖示，支援打包環境"""
-    import sys
-    # 優先檢查打包環境中的圖示
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 打包環境
-        base_path = sys._MEIPASS
-        icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
-        icon_path = os.path.join(base_path, icon_name)
-        if os.path.exists(icon_path):
-            return QIcon(icon_path)
-
-    # 開發環境：檢查當前目錄
-    icon_name = 'lioil.ico' if os.name == 'nt' else 'lioil.icns'
-    if os.path.exists(icon_name):
-        return QIcon(icon_name)
-
-    # 預設圖示
-    return QIcon()
+from ui.app_icon import get_app_icon
 
 
 class DatabaseSettingsDialog(QDialog):
