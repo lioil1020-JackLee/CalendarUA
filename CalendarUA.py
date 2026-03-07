@@ -687,7 +687,12 @@ class CalendarUA(QMainWindow):
         view_toolbar.addWidget(self.btn_main_next)
         view_toolbar.addStretch()
 
-        # 右側按鈕區：日/週/月/假日（可高亮）
+        # 右側工具區：日/週/月/假日（可高亮）+ 系統時間
+        right_tools_widget = QWidget()
+        right_tools_layout = QHBoxLayout(right_tools_widget)
+        right_tools_layout.setContentsMargins(0, 0, 0, 0)
+        right_tools_layout.setSpacing(6)
+
         self.btn_view_schedule_list = QPushButton("排程清單")
         self.btn_view_day = QPushButton("日")
         self.btn_view_week = QPushButton("週")
@@ -696,12 +701,25 @@ class CalendarUA(QMainWindow):
         for btn in (self.btn_view_schedule_list, self.btn_view_day, self.btn_view_week, self.btn_view_month):
             btn.setCheckable(True)
             btn.setMinimumWidth(48 if btn != self.btn_view_schedule_list else 88)
-            view_toolbar.addWidget(btn)
+            right_tools_layout.addWidget(btn)
         self.btn_holiday_settings.setCheckable(False)
         self.btn_holiday_settings.setMinimumWidth(48)
-        view_toolbar.addWidget(self.btn_holiday_settings)
+        right_tools_layout.addWidget(self.btn_holiday_settings)
+
+        self.system_datetime_label = QLabel("")
+        self.system_datetime_label.setObjectName("systemDateTimeLabel")
+        self.system_datetime_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.system_datetime_label.setMinimumWidth(190)
+        right_tools_layout.addWidget(self.system_datetime_label)
+
+        view_toolbar.addWidget(right_tools_widget, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         right_layout.addLayout(view_toolbar)
+
+        self._datetime_timer = QTimer(self)
+        self._datetime_timer.timeout.connect(self._update_system_datetime_label)
+        self._datetime_timer.start(1000)
+        self._update_system_datetime_label()
 
         # 主行事曆視圖堆疊
         self.calendar_stack = QStackedWidget()
@@ -1104,6 +1122,20 @@ class CalendarUA(QMainWindow):
                 }
             """
         self.btn_holiday_settings.setStyleSheet(holiday_style)
+
+        if hasattr(self, "system_datetime_label"):
+            if is_dark:
+                self.system_datetime_label.setStyleSheet(
+                    "color: #d6d6d6; font-family: 'Consolas'; font-size: 20px; font-weight: 800;"
+                )
+            else:
+                self.system_datetime_label.setStyleSheet(
+                    "color: #2f2f2f; font-family: 'Consolas'; font-size: 20px; font-weight: 800;"
+                )
+
+    def _update_system_datetime_label(self):
+        if hasattr(self, "system_datetime_label"):
+            self.system_datetime_label.setText(datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
 
     def _apply_light_theme(self):
         """套用亮色主題"""

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QStyle,
 )
 from PySide6.QtCore import Qt, QDate, QTime, Signal, QEvent, QSize, QLocale, QPoint, QTimer
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QGuiApplication
 import sys
 from datetime import date as dt_date
 
@@ -57,7 +57,7 @@ class DropdownNavCalendar(QCalendarWidget):
         self.setLocale(QLocale(QLocale.Chinese, QLocale.Taiwan))
         self.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.setHorizontalHeaderFormat(QCalendarWidget.ShortDayNames)
-        self.setMinimumSize(250, 230)
+        self.setMinimumSize(280, 270)
 
         header_widget = QWidget(self)
         header_layout = QHBoxLayout(header_widget)
@@ -105,7 +105,7 @@ class DropdownNavCalendar(QCalendarWidget):
             """
             QComboBox {
                 font-family: 'Segoe UI';
-                font-size: 16px;
+                font-size: 15px;
                 padding-right: 2px;
             }
             QComboBox QAbstractItemView {
@@ -275,18 +275,18 @@ class DropdownNavCalendar(QCalendarWidget):
         solar_font = QFont(painter.font())
         solar_font.setFamily("Segoe UI")
         solar_font.setBold(True)
-        solar_font.setPointSize(13)
+        solar_font.setPointSize(12)
         painter.setFont(solar_font)
-        top_rect = rect.adjusted(0, 1, 0, -rect.height() // 2)
+        top_rect = rect.adjusted(0, 2, 0, -int(rect.height() * 0.48))
         painter.drawText(top_rect, Qt.AlignHCenter | Qt.AlignVCenter, str(date.day()))
 
         if lunar_text:
             lunar_font = QFont(painter.font())
             lunar_font.setFamily("Microsoft JhengHei")
             lunar_font.setBold(False)
-            lunar_font.setPointSize(9)
+            lunar_font.setPointSize(8)
             painter.setFont(lunar_font)
-            bottom_rect = rect.adjusted(0, rect.height() // 2 - 1, 0, 0)
+            bottom_rect = rect.adjusted(0, int(rect.height() * 0.50), 0, -1)
             painter.drawText(bottom_rect, Qt.AlignHCenter | Qt.AlignVCenter, lunar_text)
 
         painter.restore()
@@ -475,9 +475,30 @@ class PopupDateEdit(QDateEdit):
         if calendar is None:
             return
         calendar.setSelectedDate(self.date())
-        if calendar.height() < 230:
-            calendar.resize(max(calendar.width(), 250), 230)
+        min_width = 280
+        min_height = 270
+        if calendar.width() < min_width or calendar.height() < min_height:
+            calendar.resize(max(calendar.width(), min_width), max(calendar.height(), min_height))
+
         popup_pos = self.mapToGlobal(QPoint(0, self.height()))
+
+        screen = QGuiApplication.screenAt(popup_pos)
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+
+            # 優先顯示在輸入框下方，若空間不足則顯示於上方。
+            if popup_pos.y() + calendar.height() > available.bottom():
+                popup_pos.setY(self.mapToGlobal(QPoint(0, 0)).y() - calendar.height())
+
+            if popup_pos.x() + calendar.width() > available.right():
+                popup_pos.setX(max(available.left(), available.right() - calendar.width()))
+            if popup_pos.x() < available.left():
+                popup_pos.setX(available.left())
+            if popup_pos.y() < available.top():
+                popup_pos.setY(available.top())
+
         calendar.move(popup_pos)
         calendar.show()
         calendar.raise_()
