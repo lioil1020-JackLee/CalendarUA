@@ -667,6 +667,7 @@ class RecurrenceDialog(QDialog):
         self.initial_time: QTime | None = initial_time
         self.embedded = embedded
         self._wheel_combo_targets: dict[object, QComboBox] = {}
+        self._combo_side_buttons: dict[QComboBox, tuple[QToolButton, QToolButton]] = {}
 
         if not self.embedded:
             self.setWindowTitle("週期性約會")
@@ -860,7 +861,7 @@ class RecurrenceDialog(QDialog):
 
         self.time_guide_label = QLabel(
             "操作方式:\n"
-            "1. 點右側箭頭: 展開下拉選單\n"
+            "1. 點左右兩側箭頭: 展開下拉選單\n"
             "2. 點中間文字區: 直接鍵入\n"
             "3. 雙擊中間文字區: 以滑鼠拖曳選取文字\n"
             "4. Lock: 在開始到結束期間持續鎖定 OPC UA Tag 值"
@@ -875,23 +876,54 @@ class RecurrenceDialog(QDialog):
         return group
 
     def _build_combo_with_side_arrows(self, combo: QComboBox) -> QWidget:
-        """建立右側箭頭 + 中央可輸入的複合控件。"""
-        container = QWidget(self)
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
+        """在 Combo 內部顯示左右下拉箭頭，保持單一輸入框外觀。"""
+        combo.setProperty("sideArrows", True)
 
-        right_btn = QToolButton(container)
+        left_btn = QToolButton(combo)
+        left_btn.setObjectName("comboSideArrow")
+        left_btn.setText("▼")
+        left_btn.setToolTip("展開選單")
+        left_btn.setCursor(Qt.PointingHandCursor)
+        left_btn.setAutoRaise(True)
+        left_btn.setFocusPolicy(Qt.NoFocus)
+        left_btn.clicked.connect(combo.showPopup)
+
+        right_btn = QToolButton(combo)
+        right_btn.setObjectName("comboSideArrow")
         right_btn.setText("▼")
         right_btn.setToolTip("展開選單")
         right_btn.setCursor(Qt.PointingHandCursor)
         right_btn.setAutoRaise(True)
-        right_btn.setFixedWidth(20)
+        right_btn.setFocusPolicy(Qt.NoFocus)
         right_btn.clicked.connect(combo.showPopup)
 
-        row.addWidget(combo)
-        row.addWidget(right_btn)
-        return container
+        self._combo_side_buttons[combo] = (left_btn, right_btn)
+        self._layout_combo_side_buttons(combo)
+        left_btn.show()
+        right_btn.show()
+        left_btn.raise_()
+        right_btn.raise_()
+        return combo
+
+    def _layout_combo_side_buttons(self, combo: QComboBox):
+        buttons = self._combo_side_buttons.get(combo)
+        if buttons is None:
+            return
+
+        left_btn, right_btn = buttons
+        rect = combo.rect()
+        side_margin = 3
+        btn_width = 16
+        btn_height = max(14, rect.height() - 6)
+        y_pos = max(1, (rect.height() - btn_height) // 2)
+
+        left_btn.setGeometry(side_margin, y_pos, btn_width, btn_height)
+        right_btn.setGeometry(rect.width() - side_margin - btn_width, y_pos, btn_width, btn_height)
+
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            text_margin = btn_width + side_margin + 3
+            line_edit.setTextMargins(text_margin, 0, text_margin, 0)
 
     def _apply_time_guide_label_style(self):
         """依主題更新右側操作說明文字顏色。"""
@@ -2159,6 +2191,9 @@ class RecurrenceDialog(QDialog):
                     background-color: #1e1e1e;
                     color: #cccccc;
                 }
+                QComboBox[sideArrows="true"] {
+                    padding: 0px;
+                }
                 QComboBox::drop-down {
                     width: 0px;
                     border: none;
@@ -2167,6 +2202,20 @@ class RecurrenceDialog(QDialog):
                     image: none;
                     width: 0px;
                     height: 0px;
+                }
+                QToolButton#comboSideArrow {
+                    border: none;
+                    background-color: transparent;
+                    color: #cccccc;
+                    padding: 0px;
+                    font-weight: bold;
+                }
+                QToolButton#comboSideArrow:hover {
+                    background-color: #3d3d3d;
+                    border-radius: 3px;
+                }
+                QToolButton#comboSideArrow:pressed {
+                    background-color: #094771;
                 }
                 QSpinBox:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
                     border: 2px solid #0e639c;
@@ -2286,6 +2335,9 @@ class RecurrenceDialog(QDialog):
                     background-color: white;
                     color: #333;
                 }
+                QComboBox[sideArrows="true"] {
+                    padding: 0px;
+                }
                 QComboBox::drop-down {
                     width: 0px;
                     border: none;
@@ -2294,6 +2346,20 @@ class RecurrenceDialog(QDialog):
                     image: none;
                     width: 0px;
                     height: 0px;
+                }
+                QToolButton#comboSideArrow {
+                    border: none;
+                    background-color: transparent;
+                    color: #333;
+                    padding: 0px;
+                    font-weight: bold;
+                }
+                QToolButton#comboSideArrow:hover {
+                    background-color: #e1e8ef;
+                    border-radius: 3px;
+                }
+                QToolButton#comboSideArrow:pressed {
+                    background-color: #c7d4e2;
                 }
                 QSpinBox:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus {
                     border: 2px solid #0078d4;
@@ -2357,6 +2423,12 @@ class RecurrenceDialog(QDialog):
             (self.duration_combo, self.duration_combo.lineEdit()),
         ]
 
+        if event.type() in (QEvent.Resize, QEvent.Show):
+            for combo, _line_edit in combo_pairs:
+                if obj is combo:
+                    self._layout_combo_side_buttons(combo)
+                    break
+
         wheel_targets: dict[object, QComboBox] = {}
         for combo, line_edit in combo_pairs:
             wheel_targets[combo] = combo
@@ -2379,7 +2451,7 @@ class RecurrenceDialog(QDialog):
                 if obj is line_edit and combo.isEnabled():
                     x_pos = int(event.position().x()) if hasattr(event, "position") else int(event.x())
                     side_zone = 18
-                    if x_pos >= max(side_zone, line_edit.width() - side_zone):
+                    if x_pos <= side_zone or x_pos >= max(side_zone, line_edit.width() - side_zone):
                         QTimer.singleShot(0, combo.showPopup)
                         event.accept()
                         return True
