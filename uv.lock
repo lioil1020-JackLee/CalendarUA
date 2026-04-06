@@ -51,18 +51,13 @@ wheels = [
 [[package]]
 name = "calendarua"
 version = "2.4.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "asyncua" },
     { name = "lunardate" },
     { name = "pyside6" },
     { name = "python-dateutil" },
     { name = "qasync" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pyinstaller" },
 ]
 
 [package.dev-dependencies]
@@ -74,12 +69,10 @@ dev = [
 requires-dist = [
     { name = "asyncua", specifier = "==1.1.5" },
     { name = "lunardate", specifier = "==0.2.2" },
-    { name = "pyinstaller", marker = "extra == 'dev'", specifier = "==6.18.0" },
     { name = "pyside6", specifier = "==6.7.2" },
     { name = "python-dateutil", specifier = "==2.9.0" },
     { name = "qasync", specifier = "==0.27.1" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pyinstaller", specifier = "==6.18.0" }]

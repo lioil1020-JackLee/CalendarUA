@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -16,15 +16,10 @@ dependencies = [
     "lunardate==0.2.2",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pyinstaller==6.18.0",
-]
-
-[tool.setuptools]
-packages = ["core", "database", "ui"]
-
 [dependency-groups]
 dev = [
     "pyinstaller==6.18.0",
 ]
+
+[tool.uv]
+package = false

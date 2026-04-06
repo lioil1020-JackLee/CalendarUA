@@ -41,9 +41,9 @@ CalendarUA/
 |  |- holiday_settings_dialog.py  # 假日規則設定
 |  |- database_settings_dialog.py # 資料庫設定
 |  |- app_icon.py                 # 共用程式圖示 helper
-|- db_schema.md                   # 資料庫結構文件
-|- rrule.md                       # RRULE 規則文件
-|- requirements.txt
+|- docs/
+|  |- db_schema.md                # 資料庫結構文件
+|  `- rrule.md                    # RRULE 規則文件
 |- pyproject.toml
 |- CalendarUA-onedir.spec
 `- CalendarUA-onefile.spec
@@ -57,18 +57,11 @@ CalendarUA/
 
 ## 4. 安裝與啟動
 
-### 使用 `uv`（建議）
+### 使用 `uv`
 
 ```bash
-uv sync --dev
+uv sync --group dev
 uv run python CalendarUA.py
-```
-
-### 使用 `pip`
-
-```bash
-pip install -r requirements.txt
-python CalendarUA.py
 ```
 
 ## 5. 操作說明
@@ -119,6 +112,7 @@ python CalendarUA.py
 ### onedir
 
 ```bash
+uv sync --group dev
 uv run pyinstaller --clean --noconfirm CalendarUA-onedir.spec
 ```
 
@@ -127,6 +121,7 @@ uv run pyinstaller --clean --noconfirm CalendarUA-onedir.spec
 ### onefile
 
 ```bash
+uv sync --group dev
 uv run pyinstaller --clean --noconfirm CalendarUA-onefile.spec
 ```
 
@@ -136,10 +131,10 @@ uv run pyinstaller --clean --noconfirm CalendarUA-onefile.spec
 
 ```bash
 # 語法檢查
-python -m py_compile CalendarUA.py core/*.py database/*.py ui/*.py
+uv run python -m py_compile CalendarUA.py core/*.py database/*.py ui/*.py
 
-# 重新安裝依賴
-pip install -r requirements.txt
+# 重新同步依賴
+uv sync --group dev
 ```
 
 ## 8. 疑難排解
@@ -154,5 +149,5 @@ pip install -r requirements.txt
 
 ## 9. 相關文件
 
-- 資料庫結構：`db_schema.md`
-- RRULE 與自訂參數：`rrule.md`
+- 資料庫結構：`docs/db_schema.md`
+- RRULE 與自訂參數：`docs/rrule.md`
