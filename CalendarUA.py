@@ -422,6 +422,249 @@ class SchedulerWorker(QThread):
         self.wait(2000)
 
 
+class ScheduleLoadWorker(QThread):
+    """背景載入排程資料，並預先計算目前視圖需要的 occurrence。"""
+
+    loaded = Signal(int, dict)
+    failed = Signal(int, str)
+
+    def __init__(
+        self,
+        request_id: int,
+        db_path: str,
+        view_mode: str,
+        reference_date_iso: str,
+        execution_counts: Optional[Dict[int, int]] = None,
+    ):
+        super().__init__()
+        self.request_id = request_id
+        self.db_path = db_path
+        self.view_mode = view_mode
+        self.reference_date_iso = reference_date_iso
+        self.execution_counts = execution_counts or {}
+
+    @staticmethod
+    def _build_view_range(view_mode: str, reference_date: QDate) -> tuple[Optional[datetime], Optional[datetime]]:
+        start: Optional[datetime] = None
+        end: Optional[datetime] = None
+
+        if view_mode == "day":
+            start = datetime(reference_date.year(), reference_date.month(), reference_date.day())
+            end = start + timedelta(days=1)
+        elif view_mode == "week":
+            week_start = reference_date.addDays(-(reference_date.dayOfWeek() - 1))
+            week_end = week_start.addDays(7)
+            start = datetime(week_start.year(), week_start.month(), week_start.day())
+            end = datetime(week_end.year(), week_end.month(), week_end.day())
+        elif view_mode == "month":
+            first = QDate(reference_date.year(), reference_date.month(), 1)
+            days_to_sunday = first.dayOfWeek() % 7
+            grid_start = first.addDays(-days_to_sunday)
+            grid_end = grid_start.addDays(42)
+            start = datetime(grid_start.year(), grid_start.month(), grid_start.day())
+            end = datetime(grid_end.year(), grid_end.month(), grid_end.day())
+
+        return start, end
+
+    @staticmethod
+    def _format_schedule_description(rrule_str: str, schedule_id: int = 0, execution_counts: Optional[Dict[int, int]] = None) -> str:
+        if not rrule_str:
+            return "未設定"
+
+        execution_counts = execution_counts or {}
+        try:
+            parts = rrule_str.upper().split(";")
+            freq_map = {
+                "DAILY": "每天",
+                "WEEKLY": "每週",
+                "MONTHLY": "每月",
+                "YEARLY": "每年",
+                "HOURLY": "每小時",
+                "MINUTELY": "每分鐘",
+                "SECONDLY": "每秒",
+            }
+
+            freq_code = ""
+            freq = ""
+            interval = 1
+            byday = ""
+            bymonthday = ""
+            byhour = ""
+            byminute = ""
+            bysecond = ""
+            count = ""
+            until = ""
+            bymonth = ""
+            bysetpos = ""
+            is_lunar = False
+
+            for part in parts:
+                if part.startswith("FREQ="):
+                    freq_code = part.split("=", 1)[1]
+                    freq = freq_map.get(freq_code, freq_code)
+                elif part.startswith("INTERVAL="):
+                    interval = int(part.split("=", 1)[1])
+                elif part.startswith("BYDAY="):
+                    byday = part.split("=", 1)[1]
+                elif part.startswith("BYMONTHDAY="):
+                    bymonthday = part.split("=", 1)[1]
+                elif part.startswith("BYHOUR="):
+                    byhour = part.split("=", 1)[1]
+                elif part.startswith("BYMINUTE="):
+                    byminute = part.split("=", 1)[1]
+                elif part.startswith("BYSECOND="):
+                    bysecond = part.split("=", 1)[1]
+                elif part.startswith("COUNT="):
+                    count = part.split("=", 1)[1]
+                elif part.startswith("UNTIL="):
+                    until = part.split("=", 1)[1]
+                elif part.startswith("BYMONTH="):
+                    bymonth = part.split("=", 1)[1]
+                elif part.startswith("BYSETPOS="):
+                    bysetpos = part.split("=", 1)[1]
+                elif part.startswith("X-LUNAR="):
+                    is_lunar = part.split("=", 1)[1] == "1"
+
+            if count and schedule_id:
+                try:
+                    original_count = int(count)
+                    executed_count = execution_counts.get(schedule_id, 0)
+                    count = str(max(0, original_count - executed_count))
+                except ValueError:
+                    pass
+
+            desc_parts: List[str] = []
+            desc_parts.append(f"每{interval}{freq[1:]}" if interval > 1 and freq else freq or "未設定")
+
+            if bymonth and bymonthday:
+                desc_parts.append(f"{int(bymonth)}月{int(bymonthday)}日")
+            elif bysetpos and byday:
+                desc_parts.append(f"{bysetpos} {byday}")
+            elif byday:
+                desc_parts.append(byday)
+            elif bymonthday:
+                desc_parts.append(f"每月 {bymonthday} 日")
+
+            if byhour:
+                hour = int(byhour)
+                minute = int(byminute) if byminute else 0
+                second = int(bysecond) if bysecond else 0
+                desc_parts.append(f"{hour:02d}:{minute:02d}:{second:02d}")
+            elif byminute and freq_code in {"MINUTELY", "SECONDLY"}:
+                desc_parts.append(f"分鐘={byminute}")
+
+            if count:
+                desc_parts.append(f"剩餘 {count} 次")
+            elif until and len(until) >= 8:
+                desc_parts.append(f"到 {until[:4]}/{until[4:6]}/{until[6:8]}")
+
+            description = " ".join(part for part in desc_parts if part)
+            return f"[農曆] {description}" if is_lunar else description
+        except Exception:
+            return rrule_str
+
+    @staticmethod
+    def _calculate_next_execution_time(schedule: Dict[str, Any]) -> str:
+        rrule_str = schedule.get("rrule_str", "")
+        if not rrule_str:
+            return "未設定"
+
+        try:
+            next_time = RRuleParser.get_next_trigger(rrule_str)
+
+            until_expired = False
+            for part in str(rrule_str).upper().split(";"):
+                if part.startswith("UNTIL="):
+                    until_value = part.split("=", 1)[1]
+                    if len(until_value) >= 8:
+                        try:
+                            until_date = datetime(
+                                int(until_value[:4]),
+                                int(until_value[4:6]),
+                                int(until_value[6:8]),
+                            ).date()
+                            if until_date < datetime.now().date():
+                                until_expired = True
+                        except ValueError:
+                            pass
+                    break
+
+            if next_time:
+                return next_time.strftime("%Y/%m/%d %H:%M:%S")
+            return "已過期" if until_expired else "已結束"
+        except Exception:
+            return "計算失敗"
+
+    def _build_schedule_list_rows(self, schedules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for schedule in schedules:
+            schedule_id = int(schedule.get("id", 0) or 0)
+            title = str(schedule.get("task_name", "")).strip() or f"任務{schedule_id}"
+            rrule_str = str(schedule.get("rrule_str", "") or "")
+            rows.append(
+                {
+                    "id": schedule_id,
+                    "title": title,
+                    "fields": [
+                        ("啟用", "是" if bool(schedule.get("is_enabled", 1)) else "否"),
+                        ("Lock", "是" if bool(schedule.get("lock_enabled", 0)) else "否"),
+                        ("OPC URL", str(schedule.get("opc_url", "") or "")),
+                        ("Node ID", str(schedule.get("node_id", "") or "")),
+                        ("目標值", str(schedule.get("target_value", "") or "")),
+                        ("資料型別", str(schedule.get("data_type", "auto") or "auto")),
+                        (
+                            "週期規則",
+                            self._format_schedule_description(
+                                rrule_str,
+                                schedule_id=schedule_id,
+                                execution_counts=self.execution_counts,
+                            ),
+                        ),
+                        ("RRULE", rrule_str),
+                        ("下次執行", self._calculate_next_execution_time(schedule)),
+                        ("最後狀態", str(schedule.get("last_execution_status", "") or "")),
+                        ("忽略假日", "是" if bool(schedule.get("ignore_holiday", 0)) else "否"),
+                    ],
+                }
+            )
+        return rows
+
+    def run(self):
+        try:
+            db_manager = SQLiteManager(self.db_path)
+            schedules = db_manager.get_all_schedules()
+            schedule_exceptions = db_manager.get_all_schedule_exceptions()
+            holiday_entries = db_manager.get_all_holiday_entries()
+
+            reference_date = QDate.fromString(self.reference_date_iso, "yyyy-MM-dd")
+            if not reference_date.isValid():
+                reference_date = QDate.currentDate()
+
+            occurrences: List[Any] = []
+            range_start, range_end = self._build_view_range(self.view_mode, reference_date)
+            if range_start is not None and range_end is not None:
+                occurrences = resolve_occurrences_for_range(
+                    schedules,
+                    range_start,
+                    range_end,
+                    schedule_exceptions,
+                    holiday_entries,
+                    db_manager,
+                )
+
+            payload = {
+                "schedules": [dict(row) for row in schedules],
+                "schedule_exceptions": [dict(row) for row in schedule_exceptions],
+                "holiday_entries": [dict(row) for row in holiday_entries],
+                "occurrences": occurrences,
+                "schedule_list_rows": self._build_schedule_list_rows([dict(row) for row in schedules]) if self.view_mode == "list" else [],
+                "cache_key": f"{self.view_mode}|{self.reference_date_iso}",
+            }
+            self.loaded.emit(self.request_id, payload)
+        except Exception as e:
+            self.failed.emit(self.request_id, str(e))
+
+
 class CalendarUA(QMainWindow):
     """CalendarUA 主視窗"""
 
@@ -439,6 +682,13 @@ class CalendarUA(QMainWindow):
         
         # 執行計數器：schedule_id -> 已執行次數
         self.execution_counts: Dict[int, int] = {}
+        self._cached_occurrences: List[Any] = []
+        self._cached_occurrences_key: str = ""
+        self._schedule_list_rows: List[Dict[str, Any]] = []
+        self._schedule_load_worker: Optional[ScheduleLoadWorker] = None
+        self._schedule_load_in_progress = False
+        self._pending_schedule_load: Optional[dict] = None
+        self._schedule_load_request_id = 0
         
         # 正在執行的任務ID集合，防止重複執行
         self.running_tasks: set[int] = set()
@@ -1825,60 +2075,45 @@ class CalendarUA(QMainWindow):
         if not self.db_manager:
             return
 
+        snapshot = self._build_schedule_load_snapshot()
+        self.label_current_range.setText(snapshot["range_label"])
+
         if self.current_view_mode == "list":
-            self.label_current_range.setText("排程參數清單")
+            if self._cached_occurrences_key != snapshot["cache_key"] or not self._schedule_list_rows:
+                self.load_schedules()
             self._refresh_schedule_list_view()
             return
 
-        from datetime import datetime, timedelta
+        if self._cached_occurrences_key != snapshot["cache_key"]:
+            self.load_schedules()
+            return
 
-        # 確保一開始就以「今天」為基準，而不是某些地方把日期重設為該月 1 號
+        self._apply_occurrences_to_views(self._cached_occurrences)
+
+    def _build_schedule_load_snapshot(self) -> dict:
         qd = self.reference_date if self.reference_date.isValid() else QDate.currentDate()
-        start = end = None
+        cache_key = f"{self.current_view_mode}|{qd.toString('yyyy-MM-dd')}"
+        range_label = qd.toString("yyyy年%m月%d日")
 
-        if self.current_view_mode == "day":
-            start = datetime(qd.year(), qd.month(), qd.day())
-            end = start + timedelta(days=1)
-            self.label_current_range.setText(start.strftime("%Y年%m月%d日"))
+        if self.current_view_mode == "list":
+            range_label = "排程參數清單"
         elif self.current_view_mode == "week":
-            # 以週日為一週起始（配合 UI 標頭「日 一 二 三 四 五 六」）
-            weekday = qd.dayOfWeek()  # 1=Mon, 7=Sun
-            # 將 Sunday 視為 0，其餘 1..6 對應 Mon..Sat
+            weekday = qd.dayOfWeek()
             offset_from_sunday = weekday % 7
             week_start = qd.addDays(-offset_from_sunday)
             week_end = week_start.addDays(6)
-            start = datetime(week_start.year(), week_start.month(), week_start.day())
-            end = datetime(week_end.year(), week_end.month(), week_end.day()) + timedelta(
-                days=1
-            )
-            self.label_current_range.setText(
-                f"{week_start.toString('yyyy/MM/dd')} - {week_end.toString('yyyy/MM/dd')}"
-            )
-        else:
-            # 月視圖（Year 模式目前沿用月視圖）
-            first = QDate(qd.year(), qd.month(), 1)
-            # 月格固定顯示 6x7（42 天），包含前後月的灰色日期格
-            # 因此查詢範圍需覆蓋整個可見月格，而非僅當月。
-            days_to_sunday = first.dayOfWeek() % 7
-            grid_start = first.addDays(-days_to_sunday)
-            grid_end = grid_start.addDays(42)
-            start = datetime(grid_start.year(), grid_start.month(), grid_start.day())
-            end = datetime(grid_end.year(), grid_end.month(), grid_end.day())
-            self.label_current_range.setText(qd.toString("yyyy年 M月"))
+            range_label = f"{week_start.toString('yyyy/MM/dd')} - {week_end.toString('yyyy/MM/dd')}"
+        elif self.current_view_mode == "month":
+            range_label = qd.toString("yyyy年 M月")
 
-        if start is None or end is None:
-            return
+        return {
+            "view_mode": self.current_view_mode,
+            "reference_date_iso": qd.toString("yyyy-MM-dd"),
+            "cache_key": cache_key,
+            "range_label": range_label,
+        }
 
-        occurrences = resolve_occurrences_for_range(
-            self.schedules or [],
-            start,
-            end,
-            self.schedule_exceptions or [],
-            self.holiday_entries or [],
-            self.db_manager,
-        )
-
-        # Day / Week / Month 視圖同步
+    def _apply_occurrences_to_views(self, occurrences: List[Any]):
         self.day_view.set_reference_date(self.reference_date)
         self.day_view.set_occurrences(occurrences)
         self.day_view.relayout_to_viewport()
@@ -1918,34 +2153,21 @@ class CalendarUA(QMainWindow):
             empty_item.setText(1, "目前沒有排程")
             return
 
-        for schedule in self.schedules:
-            schedule_id = int(schedule.get("id", 0) or 0)
-            title = str(schedule.get("task_name", "")).strip() or f"任務{schedule_id}"
+        rows = self._schedule_list_rows or []
+        if not rows:
+            empty_item = QTreeWidgetItem(self.schedule_list_view)
+            empty_item.setText(0, "提示")
+            empty_item.setText(1, "清單資料載入中")
+            return
 
+        for row in rows:
+            schedule_id = int(row.get("id", 0) or 0)
+            title = str(row.get("title", "")).strip() or f"任務{schedule_id}"
             root = QTreeWidgetItem(self.schedule_list_view)
             root.setText(0, f"{title} (ID:{schedule_id})")
             root.setText(1, "")
 
-            rrule_str = str(schedule.get("rrule_str", "") or "")
-            description = self._format_schedule_description(rrule_str, schedule_id=schedule_id)
-            next_exec = self._calculate_next_execution_time(schedule)
-            lock_text = "是" if bool(schedule.get("lock_enabled", 0)) else "否"
-
-            fields = [
-                ("啟用", "是" if bool(schedule.get("is_enabled", 1)) else "否"),
-                ("Lock", lock_text),
-                ("OPC URL", str(schedule.get("opc_url", "") or "")),
-                ("Node ID", str(schedule.get("node_id", "") or "")),
-                ("目標值", str(schedule.get("target_value", "") or "")),
-                ("資料型別", str(schedule.get("data_type", "auto") or "auto")),
-                ("週期規則", description),
-                ("RRULE", rrule_str),
-                ("下次執行", next_exec),
-                ("最後狀態", str(schedule.get("last_execution_status", "") or "")),
-                ("忽略假日", "是" if bool(schedule.get("ignore_holiday", 0)) else "否"),
-            ]
-
-            for key, value in fields:
+            for key, value in row.get("fields", []):
                 child = QTreeWidgetItem(root)
                 child.setText(0, key)
                 child.setText(1, value)
@@ -2373,7 +2595,7 @@ class CalendarUA(QMainWindow):
 
                 self._load_time_scale_from_db()
 
-                self.load_schedules()
+                self.load_schedules(reset_execution_counts=True)
                 self.start_scheduler()
             else:
                 self.db_status_label.setText("資料庫: 資料表建立失敗")
@@ -2389,20 +2611,102 @@ class CalendarUA(QMainWindow):
                 f"無法連線到資料庫:\n{str(e)}\n\n請檢查資料庫設定。",
             )
 
-    def load_schedules(self):
-        """載入排程列表"""
+    def load_schedules(self, reset_execution_counts: bool = False):
+        """非阻塞載入排程資料，並在背景執行緒計算目前視圖需要的 occurrence。"""
         if not self.db_manager:
             return
 
-        self.schedules = self.db_manager.get_all_schedules()
-        self.schedule_exceptions = self.db_manager.get_all_schedule_exceptions()
-        self.holiday_entries = self.db_manager.get_all_holiday_entries()
-        # 重置執行計數器（應用程式重啟時從 0 開始）
-        self.execution_counts = {}
+        snapshot = self._build_schedule_load_snapshot()
+        snapshot["reset_execution_counts"] = bool(reset_execution_counts)
 
-        # 更新主行事曆視圖
-        self._refresh_main_calendar_views()
-        self.status_bar.showMessage(f"已載入 {len(self.schedules)} 個排程")
+        if self._schedule_load_in_progress:
+            self._pending_schedule_load = snapshot
+            return
+
+        self._start_schedule_load(snapshot)
+
+    def _start_schedule_load(self, snapshot: dict):
+        if not self.db_manager:
+            return
+
+        self._schedule_load_request_id += 1
+        request_id = self._schedule_load_request_id
+        self._schedule_load_in_progress = True
+        self._pending_schedule_load = None
+
+        self.status_bar.showMessage("正在背景載入排程資料...")
+
+        worker = ScheduleLoadWorker(
+            request_id=request_id,
+            db_path=str(self.db_manager.db_path),
+            view_mode=snapshot["view_mode"],
+            reference_date_iso=snapshot["reference_date_iso"],
+            execution_counts=dict(self.execution_counts),
+        )
+        worker.loaded.connect(
+            lambda req_id, payload, snap=dict(snapshot): self._on_schedule_load_finished(req_id, payload, snap)
+        )
+        worker.failed.connect(self._on_schedule_load_failed)
+        self._schedule_load_worker = worker
+        worker.start()
+
+    @Slot(int, dict)
+    def _on_schedule_load_finished(self, request_id: int, payload: dict, snapshot: dict):
+        if request_id != self._schedule_load_request_id:
+            return
+
+        self._schedule_load_in_progress = False
+        self._schedule_load_worker = None
+
+        self.schedules = payload.get("schedules", [])
+        self.schedule_exceptions = payload.get("schedule_exceptions", [])
+        self.holiday_entries = payload.get("holiday_entries", [])
+        self._cached_occurrences = payload.get("occurrences", [])
+        self._cached_occurrences_key = str(payload.get("cache_key", ""))
+        self._schedule_list_rows = payload.get("schedule_list_rows", [])
+
+        if snapshot.get("reset_execution_counts"):
+            self.execution_counts = {}
+        else:
+            active_ids = {
+                int(schedule.get("id", 0) or 0)
+                for schedule in self.schedules
+                if int(schedule.get("id", 0) or 0) > 0
+            }
+            self.execution_counts = {
+                schedule_id: count
+                for schedule_id, count in self.execution_counts.items()
+                if schedule_id in active_ids
+            }
+
+        latest_snapshot = self._build_schedule_load_snapshot()
+        self.label_current_range.setText(latest_snapshot["range_label"])
+
+        if self.current_view_mode == "list":
+            self._refresh_schedule_list_view()
+        elif self._cached_occurrences_key == latest_snapshot["cache_key"]:
+            self._apply_occurrences_to_views(self._cached_occurrences)
+
+        self.status_bar.showMessage(f"已載入 {len(self.schedules)} 個排程", 3000)
+
+        if self._pending_schedule_load:
+            pending = self._pending_schedule_load
+            self._pending_schedule_load = None
+            self._start_schedule_load(pending)
+
+    @Slot(int, str)
+    def _on_schedule_load_failed(self, request_id: int, error_message: str):
+        if request_id != self._schedule_load_request_id:
+            return
+
+        self._schedule_load_in_progress = False
+        self._schedule_load_worker = None
+        self.status_bar.showMessage(f"排程資料載入失敗: {error_message}", 5000)
+
+        if self._pending_schedule_load:
+            pending = self._pending_schedule_load
+            self._pending_schedule_load = None
+            self._start_schedule_load(pending)
 
     def _on_general_settings_changed(self):
         """全局設定變更時的處理"""
@@ -2925,7 +3229,6 @@ class CalendarUA(QMainWindow):
         
         self.status_bar.showMessage("正在重新載入排程...")
         self.load_schedules()
-        self.status_bar.showMessage(f"已重新載入 {len(self.schedules)} 個排程", 3000)
 
     def apply_schedules(self):
         """套用排程變更"""
@@ -2935,7 +3238,7 @@ class CalendarUA(QMainWindow):
 
         # 目前所有變更皆即時寫入，此處仍提供一致的操作入口
         self.load_schedules()
-        self.status_bar.showMessage("已套用排程變更", 3000)
+        self.status_bar.showMessage("已送出排程變更刷新", 3000)
 
     def load_project_database(self):
         """開啟既有專案資料庫（.db）。"""
